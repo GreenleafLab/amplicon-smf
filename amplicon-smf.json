@@ -1,0 +1,8 @@
+{
+  "full_name": "Benjamin Doughty",
+  "email": "benjamin.doughty@gmail.com",
+  "username": "bdoughty",
+  "project_name": "Amplicon-SMF",
+  "repo_name": "amplicon-smf",
+  "min_snakemake_version": "5.7.0"
+}

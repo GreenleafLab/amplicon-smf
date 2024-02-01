@@ -1,0 +1,14 @@
+# conda environments needed for the workflow should be stored here.
+channels:
+ - bioconda
+dependencies:
+ - python=2.7
+ - matplotlib
+ - numpy=1.16.6
+ - pandas=0.24.2
+ - pyBigWig=0.3.17
+ - pysam
+ - scipy
+ - setuptools
+ - toolshed=0.4.6
+ - wheel=0.35.1

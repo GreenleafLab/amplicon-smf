@@ -1,0 +1,23 @@
+# conda environments needed for the workflow should be stored here.
+name: python3
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - fastx_toolkit
+  - biopython=1.79
+  - bwa
+  - fastcluster
+  - htslib
+  - matplotlib
+  - methyldackel
+  - numpy
+  - pandas
+  - pysam
+  - python=3.6.1
+  - samtools
+  - scikit-learn
+  - scipy
+  - seaborn
+  - toolshed
