@@ -271,7 +271,7 @@ def run():
                                     pass
                                 else:
                                     # if GenomeDict[chr][i-1:i+2] == 'CGC':
-                                    if GenomeDict[chr][i-1:i+2] == 'GCG':
+                                    if GenomeDict[chr][i:i+3] == 'GCG':
                                         continue
                                 if readseq[i-pos-1:i-pos+1] == 'GC':
                                     scores[i-start] = 0
