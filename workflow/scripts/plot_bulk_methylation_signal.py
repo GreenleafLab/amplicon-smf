@@ -42,14 +42,19 @@ def plot_bulk_methylation(input_prefix, amplicon_fa, plots, thresh, include_cpg,
 
     # iterate through amplicons, merge the tables, plot, and join tables
     for amplicon in amplicons:
+        print(amplicon)
         gpcs = gpc_pos_dict[amplicon]
         cpgs = cpg_pos_dict[amplicon]
 
+        print(bedgraph_chg.loc[bedgraph_chg['chr']==amplicon])
+
         # join the tables
         if include_cpg or no_endog_meth:
-            all_c_df = bedgraph_chg.loc[bedgraph_chg['chr']==amplicon].append([bedgraph_chh.loc[bedgraph_chh['chr']==amplicon],bedgraph_cpg.loc[bedgraph_cpg['chr']==amplicon]]).sort_values('start')
+            all_c_df = pd.concat([bedgraph_chg.loc[bedgraph_chg['chr']==amplicon], bedgraph_chh.loc[bedgraph_chh['chr']==amplicon], bedgraph_cpg.loc[bedgraph_cpg['chr']==amplicon]]).sort_values('start')
         else:
-            all_c_df = bedgraph_chg.loc[bedgraph_chg['chr']==amplicon].append(bedgraph_chh.loc[bedgraph_chh['chr']==amplicon]).sort_values('start')
+            all_c_df = pd.concat([bedgraph_chg.loc[bedgraph_chg['chr']==amplicon], bedgraph_chh.loc[bedgraph_chh['chr']==amplicon]]).sort_values('start')
+
+        print(all_c_df)
 
         # process the table
         all_c_df['SMF'] = 100 - all_c_df['pct']
@@ -67,7 +72,7 @@ def plot_bulk_methylation(input_prefix, amplicon_fa, plots, thresh, include_cpg,
 
             # now construct the thing we will plot and return, based on whether or not we included CpG MTase
             if include_cpg:
-                cs_to_plot = all_gpc_df.append(all_cpg_df).sort_values('start')
+                cs_to_plot = pd.concat([all_gpc_df, all_cpg_df]).sort_values('start')
             else:
                 cs_to_plot = all_gpc_df
 
@@ -87,7 +92,8 @@ def plot_bulk_methylation(input_prefix, amplicon_fa, plots, thresh, include_cpg,
             # all_other_c_df['GpC'] = False
 
             fig, ax = plt.subplots()
-            sns.barplot(data=all_other_c_df.append([all_cpg_df,all_gpc_df]), x='context', y='pct')
+            sns.barplot(data=pd.concat([all_other_c_df,all_cpg_df,all_gpc_df]), x='context', y='pct')
+            # sns.barplot(data=all_other_c_df.append([all_cpg_df,all_gpc_df]), x='context', y='pct')
             # sns.barplot(data=all_gpc_df.append(all_other_c_df), x='GpC', y='pct')
 
             ax.set_ylabel('%Methylation')
