@@ -60,9 +60,21 @@ def load_data(basedir, sample, amplicons, model_positions_file, filter_states=Fa
     TODO: Figure out how to do this across experiments to allow info sharing?
     '''
 
-    # read paths to valid states and sm classifications
-    valid_paths = [path.join(basedir,sample,'{}.{}.valid_states_table.txt'.format(sample, amplicon)) for amplicon in amplicons]
-    classification_paths = [path.join(basedir,sample,'{}.{}.single_molecule_classification.txt'.format(sample, amplicon)) for amplicon in amplicons]
+    # # read paths to valid states and sm classifications
+    # valid_paths = [path.join(basedir,sample,'{}.{}.valid_states_table.txt'.format(sample, amplicon)) for amplicon in amplicons]
+    # classification_paths = [path.join(basedir,sample,'{}.{}.single_molecule_classification.txt'.format(sample, amplicon)) for amplicon in amplicons]
+
+    # sometimes we might be missing 3xTetO because I'm dumb, so I guess here we can try to filter out the states files that aren't right
+    valid_paths = [
+        os.path.join(basedir, sample, f"{sample}.{amplicon}.valid_states_table.txt")
+        for amplicon in amplicons
+        if os.path.exists(os.path.join(basedir, sample, f"{sample}.{amplicon}.valid_states_table.txt"))
+    ]
+    classification_paths = [
+        os.path.join(basedir, sample, f"{sample}.{amplicon}.single_molecule_classification.txt")
+        for amplicon in amplicons
+        if os.path.exists(os.path.join(basedir, sample, f"{sample}.{amplicon}.single_molecule_classification.txt"))
+    ]
 
     # states = possible states, assignments = observed states
     states_list = [pd.read_table(valid_path) for valid_path in valid_paths]
