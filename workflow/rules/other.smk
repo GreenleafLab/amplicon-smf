@@ -278,21 +278,16 @@ rule join_reads_and_first_cluster:
         peaks='results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.peaklist.bed'
     output:
         'results/{experiment}/{sample}/{sample}.amplicon_stats.txt'
-        # full='results/{experiment}/{sample}/matrices/{sample}.{amplicon}.full_unclustered.matrix',
-        # clustered='results/{experiment}/{sample}/matrices/{sample}.{amplicon}.clustered.matrix'
     params:
         prefix='results/{experiment}/{sample}/matrices/{sample}',
         matdir='results/{experiment}/{sample}/matrices',
-        # amplicon=lambda wildcards: wildcards.amplicon.split('_')[0],
         subset=1000,
         ctype=lambda wildcards: 'both' if samplesheet.loc[wildcards.sample,'include_cpg'] else 'GC',
         no_endog_meth=lambda wildcards: '-noEndogenousMethylation' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else ''
     conda:
-        "envs/python2_v2.yaml"
+        "envs/python3_v6.yaml"
     shell:
-        'mkdir -p {params.matdir}; python amplicon-smf/workflow/scripts/dSMF-footprints_optional_clustering.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap amplicon-smf/workflow/scripts/heatmap.py 10 3 binary 10,100'#  -minCov 0.8'
-        # 'mkdir -p {params.matdir}; ml python/2.7.13; set +u; source $HOME/bin/VENV/VIRTUALENV_2.7.13_SAMSTATS/bin/activate; set -u; python amplicon-smf/workflow/scripts/dSMF-footprints_optional_clustering.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap amplicon-smf/workflow/scripts/heatmap.py 10 3 binary 10,100'#  -minCov 0.8'
-        # 'ml python/2.7.13; set +u; source $HOME/bin/VENV/VIRTUALENV_2.7.13_SAMSTATS/bin/activate; set -u; python amplicon-smf/workflow/scripts/dSMF-footprints_optional_clustering.py {input.bam} {input.fa} GC {input.peaks} 0 1 2 3 {params.prefix} {params.amplicon} -unstranded -subset {params.subset} -cluster -heatmap amplicon-smf/workflow/scripts/heatmap.py 10 3 binary 10,100 -minCov 0.8'
+        'mkdir -p {params.matdir}; python amplicon-smf/workflow/scripts/dSMF_footprints_clustering_py3.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap -minCov 0.8'
 
 rule plot_bulk_methylation2:
     input:
