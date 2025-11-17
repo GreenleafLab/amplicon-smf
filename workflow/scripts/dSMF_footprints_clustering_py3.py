@@ -47,8 +47,8 @@ def parse_args():
                    help="Minimum fractional region coverage required for a read")
     p.add_argument("-unstranded", action="store_true",
                    help="Ignore strand; treat all regions as '+'")
-    p.add_argument("-heatmap", nargs=5, metavar=("PY", "XPIX", "YPIX", "COLORS", "DPI"),
-                   help="Generate PNG via external heatmap script")
+    p.add_argument("-heatmap", action="store_true",
+                   help="Generate heatmap PNG")
     p.add_argument("-cluster", action="store_true",
                    help="Cluster rows with Ward linkage (distance threshold=0)")
     p.add_argument("-dedup", action="store_true", default=False,
