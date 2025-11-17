@@ -1,6 +1,6 @@
 rule tests:
     message: "Running unit tests..."
-    conda: "../workflow/rules/envs/smf_py3_v7.yaml"
+    conda: "../workflow/rules/envs/python3_v6.yaml"
     shell:
         r"""
         PYTHONPATH=workflow/scripts \
