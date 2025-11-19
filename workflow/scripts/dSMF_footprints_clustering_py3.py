@@ -10,13 +10,11 @@ Outputs:
 """
 import argparse
 import sys
-import subprocess
 from typing import List, Tuple, Optional
 import numpy as np
 import pandas as pd
 import pysam
 import matplotlib.pyplot as plt
-from matplotlib import colors
 from sklearn.cluster import KMeans
 
 
@@ -369,7 +367,6 @@ def main():
             mask_GC = kmer_mask(ref, "GC")
             mask_GCG = kmer_mask(ref, "GCG")
             mask_C = kmer_mask(ref, "C")
-            # TODO: Check mask construction, dinuc scoring
             
             # Collect alignments overlapping region and put in DF
             rows = []
@@ -380,6 +377,8 @@ def main():
                 if not rseq:
                     continue
                 rows.append({"qname": aln.query_name, "rstart": r0, "seq": rseq})
+            
+            # Put in DF
             if not rows:
                 print(f"No reads for: {label}")
                 continue
@@ -392,10 +391,10 @@ def main():
             # Group by read id; each group may have 2 forward segments with slight overlap
             for qname, g in df.groupby("qname", sort=False):
                 segs = list(zip(g["rstart"].to_numpy(), g["seq"].to_numpy()))
-                rstart_m, seq_m, cov_m = merge_alignments(segs,
-                                                          region_start=start,
-                                                          ref=ref,
-                                                          prefer_ref_on_conflict=True)
+                rstart_m, seq_m, _ = merge_alignments(segs,
+                                                      region_start=start,
+                                                      ref=ref,
+                                                      prefer_ref_on_conflict=True)
                 if not seq_m:
                     continue
                 sc, cov = score_read_against_region(
@@ -403,6 +402,7 @@ def main():
                     args.c_type, args.noEndogenousMethylation,
                     mask_CG, mask_GC, mask_GCG, mask_C
                 )
+                # TODO: Check CG/GC/GCG ambiguous when different args passed in
 
                 if sc is None:
                     continue
@@ -416,7 +416,8 @@ def main():
             if not scores_list:
                 print(f"No reads retained for: {label}")
                 continue
-
+            
+            # TODO: test this block more thoroughly
             # Subset best-covered reads if requested (stable, tie-aware)
             if args.subset is not None and len(scores_list) > args.subset:
                 cov = np.asarray(cover_counts)
@@ -439,7 +440,7 @@ def main():
                 ids         = [ids[i] for i in final_idx]
             
             # Make array, write some QC metrics, dedup if requested
-            all_scores = np.vstack(scores_list).astype(np.int8, copy=False)
+            all_scores = np.vstack(scores_list).astype(int, copy=False)
             total, uniq, kept_idx, all_scores = qc_dedup(all_scores, do_dedup=args.dedup)
             ids = [ids[i] for i in kept_idx]  # keep IDs in sync
             out_qc.write(f"{label}\t{total}\t{uniq}\t{total/uniq:.2f}\n")
@@ -456,7 +457,7 @@ def main():
                 all_scores = all_scores[order]
                 ids        = [ids[i] for i in order]
                 labels     = labels[order]
-                # ...write clustered matrix as you already do (using labels as first column) ...
+                # ...write clustered matrix as you  already do (using labels as first column) ...
 
                 clust_path = f"{args.out_prefix}.{label}.clustered.matrix"
                 header = "#" + chrom + "".join(f"\t{i}" for i in range(start, end))
@@ -469,32 +470,51 @@ def main():
 
                 # Optional heatmap
                 if args.heatmap:
-                    # Copy & convert
+                    xps = 10.0      # x pixel size
+                    yps = 3.0       # y pixel size
+                    inches = 10.0   # figure width in inches
+
+                    # Convert to float and hide -1 as NaN
                     plot_arr = all_scores.astype(float)
                     plot_arr[plot_arr < 0] = np.nan
 
                     # Mask NaNs so they use the "bad" color
                     plot_masked = np.ma.masked_invalid(plot_arr)
 
-                    # 0 = black, 1 = gray; NaN = transparent
-                    cmap = colors.ListedColormap(['black', 'gray'])
+                    n_rows, n_cols = plot_masked.shape
+                    if n_rows == 0 or n_cols == 0:  # Nothing to plot
+                        continue
+
+                    # Match old script: Height = n_rows*yps, Width = n_cols*xps,
+                    # fig size = (inches, inches * Height/Width)
+                    height_px = n_rows * yps
+                    width_px  = n_cols * xps
+                    height_inches = inches * (height_px / width_px)
+
+                    # 'binary' colormap with NaNs transparent
+                    cmap = plt.get_cmap("binary").copy()
                     cmap.set_bad((1.0, 1.0, 1.0, 0.0))  # RGBA, alpha=0 for NaNs
 
-                    norm = colors.BoundaryNorm([-0.5, 0.5, 1.5], cmap.N)
-
-                    fig, ax = plt.subplots(figsize=(6, 8))
+                    fig, ax = plt.subplots(figsize=(inches, height_inches), dpi=600)
                     ax.imshow(
                         plot_masked,
                         cmap=cmap,
-                        norm=norm,
-                        aspect='auto',
-                        interpolation='nearest'
+                        vmin=0.0,
+                        vmax=1.0,
+                        aspect="auto",         # same as legacy: aspect from figure size
+                        interpolation="nearest"
                     )
                     ax.set_axis_off()
                     fig.patch.set_alpha(0.0)  # transparent figure background
 
                     out_png = f"{args.out_prefix}.{label}.matrix.png"
-                    plt.savefig(out_png, dpi=600, transparent=True, bbox_inches="tight", pad_inches=0)
+                    plt.savefig(
+                        out_png,
+                        dpi=600,
+                        transparent=True,
+                        bbox_inches="tight",
+                        pad_inches=0,
+                    )
                     plt.close(fig)
 
     bam.close()
