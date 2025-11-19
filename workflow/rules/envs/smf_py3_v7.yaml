@@ -1,0 +1,23 @@
+# conda environments needed for the workflow should be stored here.
+name: smf_py3_v7
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - biopython
+  - bwa
+  - fastcluster
+  - htslib
+  - matplotlib
+  - methyldackel
+  - numpy
+  - pandas
+  - pysam
+  - python
+  - samtools
+  - scikit-learn
+  - scipy
+  - seaborn
+  - toolshed
+  - fastqc
