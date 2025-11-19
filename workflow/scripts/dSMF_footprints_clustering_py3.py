@@ -53,24 +53,6 @@ def parse_args():
                    help="Deduplicate rows with identical C protection patterns before clustering and plotting")
     return p.parse_args()
 
-def kmer_mask(seq: str, kmer: str) -> np.ndarray:
-    """
-    Boolean mask of positions where `kmer` starts in `seq`.
-    Length: len(seq) - len(kmer) + 1 (0 if seq shorter than kmer).
-    This is case sensitive.
-    """
-    k = len(kmer)
-    n = len(seq)
-    if n < k:
-        return np.zeros(0, dtype=bool)
-    s = np.frombuffer(seq.encode("ascii"), dtype="S1")
-    t = np.frombuffer(kmer.encode("ascii"), dtype="S1")
-    L = n - k + 1
-    hits = np.ones(L, dtype=bool)
-    for i in range(k):
-        hits &= (s[i:i+L] == t[i])
-    return hits
-
 def reconstruct_aligned_query(aln: pysam.AlignedSegment) -> Tuple[int, str]:
     """
     Reconstruct the query sequence aligned to the reference:
@@ -175,29 +157,37 @@ def score_read_against_region(
     rstart: int,
     rseq: str,
     region_start: int,
-    region_len: int,
     c_type: str,
     no_endog: bool,
-    mask_CG: np.ndarray,
-    mask_GC: np.ndarray,
-    mask_GCG: np.ndarray,
-    mask_C: np.ndarray,
+    ref: str,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
-    Build scores for a single read over [region_start, region_start+region_len).
+    Build scores for a single read over [region_start, region_start+len(ref)).
 
-    scores: int8 array of length region_len where:
+    scores: int8 array of length len(ref) where:
         1 = protected / unmethylated
         0 = methylated / unprotected
        -1 = not a scored site (non-target context or uncovered)
 
-    c_type can be "CG", "GC", "both", or "C" (aka "allC") to score every cytosine.
+    Contexts:
+
+      - GC + no_endog=True  → GCN  (include GCG)
+      - GC + no_endog=False → GCH  (exclude GCG)
+      - CG                  → NCG (C of a CG)
+      - allC                → all cytosines
+      - both_dimers         → union of GC(+/-GCG filter) and CG
+
+    The *C* is the base scored in the motif.
     """
-    L = region_len
+    # Length of reference region
+    L = len(ref)
+    if L == 0:
+        return None, None
+
     scores = np.full(L, -1, dtype=np.int8)
     covered = np.zeros(L, dtype=bool)
 
-    # overlap of this read's aligned segment with the region
+    # Overlap of this read's aligned segment with the region
     ovl_start = max(0, rstart - region_start)
     ovl_end   = min(L, (rstart - region_start) + len(rseq))
     if ovl_end <= ovl_start:
@@ -205,53 +195,46 @@ def score_read_against_region(
 
     covered[ovl_start:ovl_end] = True
 
-    def _score_dinuc(mask: np.ndarray, want: str, skip_gcg: bool):
-        """Score dinucleotides starting at i (i and i+1 get the same call)."""
-        if mask.size == 0:
-            return
-        # mask for k=2 has length L-1; clamp to that space
-        s0 = max(ovl_start, 0)
-        s1 = min(ovl_end - 1, mask.size)   # last valid start index is L-2 => mask.size-1
-        if s1 <= s0:
-            return
-        starts = np.nonzero(mask[s0:s1])[0] + s0
-        for i in starts:
-            if skip_gcg and (i < mask_GCG.size) and mask_GCG[i]:
-                continue
-            # read-relative index of the first base of the dinucleotide
-            rr = (region_start + i) - rstart
-            # Need two read bases: rr and rr+1
-            if 0 <= rr and rr + 1 < len(rseq):
-                call = 0 if rseq[rr:rr+2] == want else 1
-                scores[i] = call
-                if i + 1 < L:
-                    scores[i + 1] = call
+    # reference as bytes
+    ref_arr = np.frombuffer(ref.encode("ascii"), dtype="S1")
 
-    def _score_mono(mask: np.ndarray):
-        """Score every cytosine position individually."""
-        if mask.size == 0:
-            return
-        # mask for k=1 has length L
-        s0 = max(ovl_start, 0)
-        s1 = min(ovl_end, mask.size)
-        if s1 <= s0:
-            return
-        idx = np.nonzero(mask[s0:s1])[0] + s0
-        for i in idx:
-            rr = (region_start + i) - rstart
-            if 0 <= rr < len(rseq):
-                base = rseq[rr]
-                scores[i] = 0 if base == "C" else 1
+    # Decide which positions to score
+    score_pos = np.zeros(L, dtype=bool)
 
-    # Dinucleotide scoring
-    if c_type in ("both_dimers", "CG"):
-        _score_dinuc(mask_CG, "CG", skip_gcg=False)
-    if c_type in ("both_dimers", "GC"):
-        _score_dinuc(mask_GC, "GC", skip_gcg=(not no_endog))
+    # allCs mode: just every cytosine in the region
+    if c_type == "allC":
+        score_pos |= (ref_arr == b"C")
 
-    # Mono-C scoring (score all cytosines)
-    if c_type == 'allC':
-        _score_mono(mask_C)
+    # CG / both_dimers: C of NCG (the C in "CG")
+    if c_type in ("CG", "both_dimers"):
+        for i in range(0, L - 1):
+            if ref_arr[i] == b"C" and ref_arr[i + 1] == b"G":
+                score_pos[i] = True  # score the C
+
+    # GC / both_dimers: C of GCN or GCH depending on no_endog
+    if c_type in ("GC", "both_dimers"):
+        for i in range(0, L - 1):
+            if ref_arr[i] == b"G" and ref_arr[i + 1] == b"C":
+                include = True
+                if not no_endog:
+                    # exclude GCG when we care about endogenous methylation
+                    if i + 2 < L and ref_arr[i + 2] == b"G":
+                        include = False
+                if include:
+                    c_pos = i + 1
+                    score_pos[c_pos] = True
+
+    # Now actually score the read bases at those positions
+    for i in range(ovl_start, ovl_end):
+        if not score_pos[i]:
+            continue
+        # read-relative index of this genomic base
+        rr = (region_start + i) - rstart
+        if not (0 <= rr < len(rseq)):
+            continue
+        base = rseq[rr]
+        # C = unconverted (protected), anything else = converted
+        scores[i] = 0 if base == "C" else 1
 
     return scores, covered
 
@@ -364,10 +347,6 @@ def main():
 
             # Reference & masks
             ref = fa.fetch(chrom, start, end).upper()
-            mask_CG = kmer_mask(ref, "CG")
-            mask_GC = kmer_mask(ref, "GC")
-            mask_GCG = kmer_mask(ref, "GCG")
-            mask_C = kmer_mask(ref, "C")
             
             # Collect alignments overlapping region and put in DF
             rows = []
@@ -398,11 +377,11 @@ def main():
                                                       prefer_ref_on_conflict=True)
                 if not seq_m:
                     continue
-                sc, cov = score_read_against_region(
-                    rstart_m, seq_m, start, region_len,
-                    args.c_type, args.noEndogenousMethylation,
-                    mask_CG, mask_GC, mask_GCG, mask_C
-                )
+                sc, cov = score_read_against_region(rstart_m,   # read start
+                                                    seq_m,      # merged seq
+                                                    start,      # region start      
+                                                    args.c_type,
+                                                    args.noEndogenousMethylation)
                 # TODO: Check CG/GC/GCG ambiguous when different args passed in
 
                 if sc is None:

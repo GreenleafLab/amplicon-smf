@@ -5,241 +5,210 @@ from dSMF_footprints_clustering_py3 import score_read_against_region
 
 class TestScoreReadAgainstRegion(unittest.TestCase):
     def test_no_overlap_returns_none(self):
-        """If the read does not overlap the region, return (None, None)."""
-        L = 10
-        region_start = 100
-        region_len = L
-
-        rstart = region_start + region_len + 5  # clearly after the region
-        rseq = "ACGTACGT"
-
-        mask_CG = np.zeros(L - 1, dtype=bool)
-        mask_GC = np.zeros(L - 1, dtype=bool)
-        mask_GCG = np.zeros(max(L - 2, 0), dtype=bool)
-        mask_C = np.zeros(L, dtype=bool)
-
+        """Read completely outside region → (None, None)."""
+        ref = "ACGTACGT"
+        # region is [0, 8); read starts far to the right
         scores, covered = score_read_against_region(
-            rstart,
-            rseq,
-            region_start,
-            region_len,
+            rstart=100,
+            rseq="ACGT",
+            region_start=0,
             c_type="CG",
-            no_endog=True,
-            mask_CG=mask_CG,
-            mask_GC=mask_GC,
-            mask_GCG=mask_GCG,
-            mask_C=mask_C,
+            no_endog=False,
+            ref=ref,
         )
-
         self.assertIsNone(scores)
         self.assertIsNone(covered)
 
-    def test_simple_CG_match(self):
-        """CG context: matching CG calls 0 at both positions."""
-        ref = "ACGTA"              # CG at positions 1–2
-        L = len(ref)
+    def test_coverage_mask_partial_overlap(self):
+        """Covered positions should match the read overlap with the region."""
+        ref = "ACGTACGT"
+        # region genomic [100, 108), indices 0..7
         region_start = 100
-        region_len = L
-        rstart = region_start
-        rseq = ref  # perfect match
-
-        # CG at index 1
-        mask_CG = np.array([False, True, False, False], dtype=bool)
-        mask_GC = np.zeros(L - 1, dtype=bool)
-        mask_GCG = np.zeros(max(L - 2, 0), dtype=bool)
-        mask_C = np.array([b == "C" for b in ref], dtype=bool)
+        # read covers genomic [104, 107) → region indices 4,5,6
+        rstart = 104
+        rseq = "TGA"  # length 3
 
         scores, covered = score_read_against_region(
-            rstart,
-            rseq,
-            region_start,
-            region_len,
-            c_type="CG",
-            no_endog=True,
-            mask_CG=mask_CG,
-            mask_GC=mask_GC,
-            mask_GCG=mask_GCG,
-            mask_C=mask_C,
+            rstart=rstart,
+            rseq=rseq,
+            region_start=region_start,
+            c_type="allC",
+            no_endog=False,
+            ref=ref,
         )
-
         self.assertIsNotNone(scores)
-        self.assertEqual(scores.shape[0], L)
-        # All covered
-        self.assertTrue(np.all(covered))
+        self.assertEqual(len(scores), len(ref))
+        self.assertEqual(len(covered), len(ref))
 
-        # Expect 0 at positions 1 and 2, -1 elsewhere
-        expected = np.full(L, -1, dtype=np.int8)
-        expected[1] = 0
-        expected[2] = 0
-        np.testing.assert_array_equal(scores, expected)
+        expected_covered = np.array(
+            [False, False, False, False, True, True, True, False],
+            dtype=bool,
+        )
+        np.testing.assert_array_equal(covered, expected_covered)
 
-    def test_simple_CG_mismatch(self):
-        """CG context: non-CG in read at CG site calls 1."""
-        ref = "ACGTA"              # CG at positions 1–2
-        L = len(ref)
-        region_start = 100
-        region_len = L
-        rstart = region_start
-
-        # mutate C→T so dinucleotide is TG instead of CG
-        rseq = "ATGTA"
-
-        mask_CG = np.array([False, True, False, False], dtype=bool)
-        mask_GC = np.zeros(L - 1, dtype=bool)
-        mask_GCG = np.zeros(max(L - 2, 0), dtype=bool)
-        mask_C = np.array([b == "C" for b in ref], dtype=bool)
-
+    def test_CG_mode_NCG_scoring(self):
+        """
+        c_type='CG' → score the C in 'CG' (NCG motif conceptually).
+        """
+        ref = "ACGTCGTA"
+        # indices: 0 A,1 C,2 G,3 T,4 C,5 G,6 T,7 A
+        # CG at (1,2) and (4,5) → score positions 1 and 4
         scores, covered = score_read_against_region(
-            rstart,
-            rseq,
-            region_start,
-            region_len,
+            rstart=0,
+            rseq=ref,          # perfectly matches reference
+            region_start=0,
             c_type="CG",
-            no_endog=True,
-            mask_CG=mask_CG,
-            mask_GC=mask_GC,
-            mask_GCG=mask_GCG,
-            mask_C=mask_C,
+            no_endog=False,
+            ref=ref,
         )
-
-        expected = np.full(L, -1, dtype=np.int8)
-        expected[1] = 1
-        expected[2] = 1
+        self.assertIsNotNone(scores)
+        expected = np.array(
+            [-1, 0, -1, -1, 0, -1, -1, -1],
+            dtype=np.int8,
+        )
         np.testing.assert_array_equal(scores, expected)
+        self.assertTrue(covered.all())
 
-    def test_GC_skips_GCG_when_no_endog_false(self):
+        # If we mutate the C at position 4 to T, that position should become 1
+        rseq_mut = list(ref)
+        rseq_mut[4] = "T"
+        rseq_mut = "".join(rseq_mut)
+        scores_mut, _ = score_read_against_region(
+            rstart=0,
+            rseq=rseq_mut,
+            region_start=0,
+            c_type="CG",
+            no_endog=False,
+            ref=ref,
+        )
+        expected_mut = expected.copy()
+        expected_mut[4] = 1
+        np.testing.assert_array_equal(scores_mut, expected_mut)
+
+    def test_GC_mode_GCN_no_endog_true(self):
         """
-        GC context: when no_endog is False, positions that are part of GCG
-        (marked in mask_GCG) are skipped.
+        c_type='GC', no_endog=True → GCN (including GCG).
+        Score the C of the GC* triplet.
         """
-        # ref indices: 0 1 2
-        #             G C G
-        # GC at (0,1) and (1,2), but both are part of GCG starting at 0
-        ref = "GCG"
-        L = len(ref)
-        region_start = 100
-        region_len = L
-        rstart = region_start
-        rseq = ref  # matching
-
-        # GC starts at 0 and 1 for this short ref
-        mask_GC = np.array([True, True], dtype=bool)
-        # GCG starts at index 0
-        mask_GCG = np.array([True], dtype=bool)   # same indexing convention for start
-        mask_CG = np.zeros(L - 1, dtype=bool)
-        mask_C = np.array([b == "C" for b in ref], dtype=bool)
-
+        ref = "AGCGCAGCG"
+        # indices: 0 A,1 G,2 C,3 G,4 C,5 A,6 G,7 C,8 G
+        # GC at (1,2) triplet GCG → C at 2
+        # GC at (3,4) triplet GCA → C at 4
+        # GC at (6,7) triplet GCG → C at 7
         scores, covered = score_read_against_region(
-            rstart,
-            rseq,
-            region_start,
-            region_len,
+            rstart=0,
+            rseq=ref,
+            region_start=0,
             c_type="GC",
-            no_endog=False,        # => skip_gcg=True
-            mask_CG=mask_CG,
-            mask_GC=mask_GC,
-            mask_GCG=mask_GCG,
-            mask_C=mask_C,
+            no_endog=True,     # include both GCG and GCA contexts
+            ref=ref,
         )
-
-        # Because both GC positions are part of GCG, they should be skipped,
-        # leaving all scores = -1.
-        expected = np.full(L, -1, dtype=np.int8)
+        expected = np.array(
+            [-1, -1, 0, -1, 0, -1, -1, 0, -1],
+            dtype=np.int8,
+        )
         np.testing.assert_array_equal(scores, expected)
+        self.assertTrue(covered.all())
 
-    def test_GC_no_skip_when_no_endog_true(self):
+    def test_GC_mode_GCH_no_endog_false(self):
         """
-        GC context: when no_endog is True, GCG positions are NOT skipped.
+        c_type='GC', no_endog=False → GCH (exclude GCG).
+        So only C where the following base is not G.
         """
-        ref = "GCG"
-        L = len(ref)
-        region_start = 100
-        region_len = L
-        rstart = region_start
+        ref = "AGCGCAGCG"
+        # same as above; only the GCA at indices 3–5 (C at 4) should be scored
+        # The GCGs at 1–3 and 6–8 should be excluded.
+        # Make read all 'C' at those positions to test scoring.
         rseq = ref
-
-        mask_GC = np.array([True, True], dtype=bool)
-        mask_GCG = np.array([True], dtype=bool)
-        mask_CG = np.zeros(L - 1, dtype=bool)
-        mask_C = np.array([b == "C" for b in ref], dtype=bool)
-
-        scores, covered = score_read_against_region(
-            rstart,
-            rseq,
-            region_start,
-            region_len,
+        scores, _ = score_read_against_region(
+            rstart=0,
+            rseq=rseq,
+            region_start=0,
             c_type="GC",
-            no_endog=True,         # => skip_gcg=False
-            mask_CG=mask_CG,
-            mask_GC=mask_GC,
-            mask_GCG=mask_GCG,
-            mask_C=mask_C,
+            no_endog=False,   # exclude GCG
+            ref=ref,
         )
-
-        # Two GC start positions; each GC scores 0 at i and i+1
-        expected = np.full(L, -1, dtype=np.int8)
-        # GC at 0–1 -> indices 0,1
-        expected[0] = 0
-        expected[1] = 0
-        # GC at 1–2 -> indices 1,2
-        expected[1] = 0
-        expected[2] = 0
+        expected = np.array(
+            [-1, -1, -1, -1, 0, -1, -1, -1, -1],
+            dtype=np.int8,
+        )
         np.testing.assert_array_equal(scores, expected)
 
-    def test_allC_scoring(self):
-        """allC: every C gets scored 0 if read has C, 1 otherwise."""
-        ref = "ACCA"               # Cs at positions 1 and 2
-        L = len(ref)
-        region_start = 100
-        region_len = L
-        rstart = region_start
-
-        # Case 1: read matches ref => all Cs are unconverted (0)
-        rseq1 = ref
-        mask_C = np.array([b == "C" for b in ref], dtype=bool)
-        mask_CG = np.zeros(L - 1, dtype=bool)
-        mask_GC = np.zeros(L - 1, dtype=bool)
-        mask_GCG = np.zeros(max(L - 2, 0), dtype=bool)
-
-        scores1, covered1 = score_read_against_region(
-            rstart,
-            rseq1,
-            region_start,
-            region_len,
-            c_type="allC",
-            no_endog=True,
-            mask_CG=mask_CG,
-            mask_GC=mask_GC,
-            mask_GCG=mask_GCG,
-            mask_C=mask_C,
+        # If we change the C at position 4 to A, that site should become 1
+        rseq_mut = list(ref)
+        rseq_mut[4] = "A"
+        rseq_mut = "".join(rseq_mut)
+        scores_mut, _ = score_read_against_region(
+            rstart=0,
+            rseq=rseq_mut,
+            region_start=0,
+            c_type="GC",
+            no_endog=False,
+            ref=ref,
         )
+        expected_mut = expected.copy()
+        expected_mut[4] = 1
+        np.testing.assert_array_equal(scores_mut, expected_mut)
 
-        expected1 = np.full(L, -1, dtype=np.int8)
-        expected1[1] = 0
-        expected1[2] = 0
-        np.testing.assert_array_equal(scores1, expected1)
-
-        # Case 2: one C converted to T => that position scores 1
-        rseq2 = "ATCA"  # positions: A T C A; C only at index 2
-        scores2, covered2 = score_read_against_region(
-            rstart,
-            rseq2,
-            region_start,
-            region_len,
-            c_type="allC",
-            no_endog=True,
-            mask_CG=mask_CG,
-            mask_GC=mask_GC,
-            mask_GCG=mask_GCG,
-            mask_C=mask_C,
+    def test_both_dimers_union_of_CG_and_GC(self):
+        """
+        c_type='both_dimers' → union of CG- and GC-derived positions.
+        """
+        ref = "AGCGC"
+        # indices: 0 A,1 G,2 C,3 G,4 C
+        # GC at (1,2) → C at 2
+        # CG at (2,3) → C at 2
+        # GC at (3,4) → C at 4
+        # Union of C positions = {2,4}
+        scores, _ = score_read_against_region(
+            rstart=0,
+            rseq=ref,
+            region_start=0,
+            c_type="both_dimers",
+            no_endog=True,  # GC side → GCN (doesn't matter here)
+            ref=ref,
         )
+        expected = np.array(
+            [-1, -1, 0, -1, 0],
+            dtype=np.int8,
+        )
+        np.testing.assert_array_equal(scores, expected)
 
-        expected2 = np.full(L, -1, dtype=np.int8)
-        # index 1: ref C, read T -> 1
-        expected2[1] = 1
-        # index 2: ref C, read C -> 0
-        expected2[2] = 0
-        np.testing.assert_array_equal(scores2, expected2)
+    def test_allC_scores_every_cytosine(self):
+        """c_type='allC' → every C in the region is scored."""
+        ref = "ACCTAGC"
+        # indices: 0 A,1 C,2 C,3 T,4 A,5 G,6 C
+        rseq = ref
+        scores, covered = score_read_against_region(
+            rstart=0,
+            rseq=rseq,
+            region_start=0,
+            c_type="allC",
+            no_endog=False,
+            ref=ref,
+        )
+        expected = np.array(
+            [-1, 0, 0, -1, -1, -1, 0],
+            dtype=np.int8,
+        )
+        np.testing.assert_array_equal(scores, expected)
+        self.assertTrue(covered.all())
+
+        # Change one C → non-C and check it flips to 1
+        rseq_mut = list(ref)
+        rseq_mut[2] = "T"
+        rseq_mut = "".join(rseq_mut)
+        scores_mut, _ = score_read_against_region(
+            rstart=0,
+            rseq=rseq_mut,
+            region_start=0,
+            c_type="allC",
+            no_endog=False,
+            ref=ref,
+        )
+        expected_mut = expected.copy()
+        expected_mut[2] = 1
+        np.testing.assert_array_equal(scores_mut, expected_mut)
 
 
 if __name__ == "__main__":
