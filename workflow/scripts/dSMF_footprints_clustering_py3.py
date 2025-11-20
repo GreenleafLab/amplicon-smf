@@ -165,12 +165,11 @@ def score_read_against_region(
     Build scores for a single read over [region_start, region_start+len(ref)).
 
     scores: int8 array of length len(ref) where:
-        1 = protected / unmethylated
-        0 = methylated / unprotected
+        1 = converted cytosine
+        0 = unconverted cytosine
        -1 = not a scored site (non-target context or uncovered)
 
     Contexts:
-
       - GC + no_endog=True  → GCN  (include GCG)
       - GC + no_endog=False → GCH  (exclude GCG)
       - CG                  → NCG (C of a CG)
@@ -381,8 +380,8 @@ def main():
                                                     seq_m,      # merged seq
                                                     start,      # region start      
                                                     args.c_type,
-                                                    args.noEndogenousMethylation)
-                # TODO: Check CG/GC/GCG ambiguous when different args passed in
+                                                    args.noEndogenousMethylation,
+                                                    ref)
 
                 if sc is None:
                     continue
@@ -445,7 +444,7 @@ def main():
                     mat = all_scores[:, ::-1] if strand == "-" else all_scores
                     for lab, rid, row in zip(labels, ids, mat):
                         fh.write(f"{lab}\t" + "\t".join(map(str, row.tolist())) + "\n")
-                print(f"wrote clustered matrix: {clust_path}")
+                print(f"Wrote clustered matrix: {clust_path}")
 
                 # Optional heatmap
                 if args.heatmap:
@@ -495,5 +494,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
