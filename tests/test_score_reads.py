@@ -154,12 +154,9 @@ class TestScoreReadAgainstRegion(unittest.TestCase):
         """
         c_type='both_dimers' → union of CG- and GC-derived positions.
         """
-        ref = "AGCGC"
-        # indices: 0 A,1 G,2 C,3 G,4 C
-        # GC at (1,2) → C at 2
-        # CG at (2,3) → C at 2
-        # GC at (3,4) → C at 4
-        # Union of C positions = {2,4}
+        ref = "AGCCG"
+        # indices: 0 A, 1 G, 2 C, 3 C, 4 G
+        # Union of C positions = {2,3}
         scores, _ = score_read_against_region(
             rstart=0,
             rseq=ref,
@@ -169,7 +166,7 @@ class TestScoreReadAgainstRegion(unittest.TestCase):
             ref=ref,
         )
         expected = np.array(
-            [-1, -1, 0, -1, 0],
+            [-1, -1, 0, 0, -1],
             dtype=np.int8,
         )
         np.testing.assert_array_equal(scores, expected)
