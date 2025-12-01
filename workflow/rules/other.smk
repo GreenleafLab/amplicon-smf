@@ -91,14 +91,17 @@ rule align_bwameth:
         # read1='results/{sample}/tmp/{sample}.read1.revcomp.fastq.gz',
         # read2='results/{sample}/tmp/{sample}.read2.revcomp.fastq.gz'
     output:
-        sam=temp('results/{experiment}/{sample}/tmp/{sample}.bwameth.sam')
+        sam='results/{experiment}/{sample}/tmp/{sample}.bwameth.sam'
+    log:
+        'results/{experiment}/{sample}/tmp/{sample}.bwameth.log'
     params:
         threads=config.get('threads', 1) # 1
     conda:
         "envs/python3_v6.yaml"
     shell:
         # '/oak/stanford/groups/wjg/bgrd/scripts_share/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
-        '/oak/stanford/groups/wjg/bgrd/scripts_share/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} | grep -v "[W::sam_parse1]" > {output.sam}'
+        # '/oak/stanford/groups/wjg/bgrd/scripts_share/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} | grep -v "[W::sam_parse1]" > {output.sam}'
+        'amplicon-smf/workflow/scripts/bwameth_nobenedit.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam} 2> {log} || (echo "align_bwameth failed; stderr follows:" >&2 ; cat {log} >&2 ; exit 1)'
         # '$HOME/bin/copy_from_georgi/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
         # 'ml python/2.7.13; set +u; source $HOME/bin/VENV/VIRTUALENV_2.7.13_SAMSTATS/bin/activate; set -u; $HOME/bin/copy_from_georgi/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
         # '$HOME/bin/bwa-meth/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
@@ -114,7 +117,7 @@ rule align_bwameth_all:
         # read1='results/{sample}/tmp/{sample}.read1.revcomp.fastq.gz',
         # read2='results/{sample}/tmp/{sample}.read2.revcomp.fastq.gz'
     output:
-        sam=temp('results/{experiment}/{sample}/tmp/{sample}.bwameth.all_alignments.sam')
+        sam='results/{experiment}/{sample}/tmp/{sample}.bwameth.all_alignments.sam'
     params:
         threads=config.get('threads', 1)
     conda:
@@ -150,9 +153,9 @@ rule correct_mismatched_amplicons:
         fa='results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa'
         # bam='results/{experiment}/{sample}/tmp/{sample}.bwameth.all_alignments.sam'
     output:
-        bam=temp('results/{experiment}/{sample}/tmp/{sample}.bwameth.contig_filtered.sam'),
+        bam='results/{experiment}/{sample}/tmp/{sample}.bwameth.contig_filtered.sam',
         out_stats='results/{experiment}/{sample}/stats/{sample}.bwameth.contig_filtered.stats.txt',
-        problematic_reads=temp('results/{experiment}/{sample}/tmp/{sample}.bwameth.problematic_reads.sam')
+        problematic_reads='results/{experiment}/{sample}/tmp/{sample}.bwameth.problematic_reads.sam'
     params:
         read1_thresh=lambda wildcards: int(samplesheet.loc[wildcards.sample,'read1_length'] * config['alignment_length_fraction']), #  config['read1_length_override'].get(wildcards.sample, config['read1_length_threshold']) if 'read1_length_override' in config.keys() else config['read1_length_threshold'],
         read2_thresh=lambda wildcards: int(samplesheet.loc[wildcards.sample,'read2_length'] * config['alignment_length_fraction']), # config['read2_length_override'].get(wildcards.sample, config['read2_length_threshold']) if 'read2_length_override' in config.keys() else config['read2_length_threshold'],

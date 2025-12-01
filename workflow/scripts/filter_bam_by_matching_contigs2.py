@@ -134,6 +134,9 @@ def is_valid_alignment(aln_pair, args, fa_dict):
     passes_as_frac = (score_single(aln_pair[0]) / get_read_len(aln_pair[0]) > args.min_as_frac) and (score_single(aln_pair[1]) / get_read_len(aln_pair[1]) > args.min_as_frac)
     passes_total_covered_length = args.ignore_bounds or verify_alignment_bounds(aln_pair, fa_dict) # can override bounds checking
 
+    # print(passes_min_len, passes_as_frac, passes_total_covered_length)
+    # print(score_single(aln_pair[0]) / get_read_len(aln_pair[0]), score_single(aln_pair[1]) / get_read_len(aln_pair[1]))
+
     return passes_min_len and passes_as_frac and passes_total_covered_length
 
 def fix_read(read, mate):
