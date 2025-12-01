@@ -24,6 +24,7 @@ def argparser():
     parser.add_argument("--bam", required=True, help="Input bam or sam file (must end in .bam or .sam)")
     parser.add_argument("--out", required=True, help="Name for output sam file")
     parser.add_argument("--out_stats", required=True, help="Name for output stats file")
+    parser.add_argument("--failure_modes", required=True, help="Name for alignment failure stats file")
     parser.add_argument("--problem", required=False, help="Name for output file for problematic reads")
     parser.add_argument("--min_len_threshold1", required=False, default=140, type = int, help="Per-read length threshold to call properly aligned read")
     parser.add_argument("--min_len_threshold2", required=False, default=140, type = int, help="Per-read length threshold to call properly aligned read")
@@ -135,9 +136,8 @@ def is_valid_alignment(aln_pair, args, fa_dict):
     passes_total_covered_length = args.ignore_bounds or verify_alignment_bounds(aln_pair, fa_dict) # can override bounds checking
 
     # print(passes_min_len, passes_as_frac, passes_total_covered_length)
-    # print(score_single(aln_pair[0]) / get_read_len(aln_pair[0]), score_single(aln_pair[1]) / get_read_len(aln_pair[1]))
 
-    return passes_min_len and passes_as_frac and passes_total_covered_length
+    return passes_min_len and passes_as_frac and passes_total_covered_length, (passes_min_len, passes_as_frac, passes_total_covered_length)
 
 def fix_read(read, mate):
     '''
@@ -151,7 +151,7 @@ def fix_read(read, mate):
     read.next_reference_start = mate.reference_start
     read.next_reference_name = '='
     
-def filter_read_group(aln_list, out, problem_reads, args, fa_dict, read_types):
+def filter_read_group(aln_list, out, problem_reads, args, fa_dict, read_types, failure_modes):
     # for aln_list in read_dict:#.values():
     matching_contigs = get_matching_contigs(aln_list)
     filtered_matching_contigs = choose_best_aln_per_contig(matching_contigs)
@@ -161,7 +161,10 @@ def filter_read_group(aln_list, out, problem_reads, args, fa_dict, read_types):
         #     print(matching_contigs)
         best_score = max(scores)
         best_matching_alignment = filtered_matching_contigs[scores.index(best_score)]
-        if is_valid_alignment(best_matching_alignment, args, fa_dict):
+
+        is_valid, passing_qc_tuple = is_valid_alignment(best_matching_alignment, args, fa_dict)
+        # if is_valid_alignment(best_matching_alignment, args, fa_dict):
+        if is_valid:
         # if best_score > args.thresh:
             read1, read2 = best_matching_alignment
             # futz with mapping quality to make sure it doesn't get filtered out in the next step
@@ -172,6 +175,10 @@ def filter_read_group(aln_list, out, problem_reads, args, fa_dict, read_types):
             read_types['mapped'] += 1
         else:
             read_types['unmapped'] += 1
+            failure_list = ['alignment_length', 'alignment_score', 'bounds']
+            for idx in range(len(passing_qc_tuple)):
+                if not passing_qc_tuple[idx]:
+                    failure_modes[failure_list[idx]] += 1
             if args.write_problematic_reads:
                 for (read1, read2) in filtered_matching_contigs:
                     problem_reads.write(read1)
@@ -187,6 +194,7 @@ def filter_contigs(bam_file, out, problem_reads, args):
 
     # read_types = {'primary': 0, 'secondary': 0, 'neither': 0}
     read_types = {'mapped': 0, 'unmapped': 0}
+    failure_modes = {'alignment_length': 0, 'alignment_score': 0, 'bounds': 0}
 
     # read fasta
     fa_dict = parse_fasta(args.amplicon)
@@ -201,7 +209,7 @@ def filter_contigs(bam_file, out, problem_reads, args):
         new_cluster = read.query_name
 
         if new_cluster != old_cluster:
-            read_types = filter_read_group(alignments_list, out, problem_reads, args, fa_dict, read_types)
+            read_types = filter_read_group(alignments_list, out, problem_reads, args, fa_dict, read_types, failure_modes)
             old_cluster = new_cluster
             alignments_list = [read]
         else:
@@ -275,7 +283,7 @@ def filter_contigs(bam_file, out, problem_reads, args):
         #     else:
         #         read_types['neither'] += 1
 
-    return read_types
+    return read_types, failure_modes
 
 
 def run_filter():
@@ -320,11 +328,16 @@ def run_filter():
     # if not args.write_problematic_reads:
     #     open(fname, 'a').close()
     
-    read_types = filter_contigs(mysam, out, problem, args)
+    read_types, failure_modes = filter_contigs(mysam, out, problem, args)
 
     with open(args.out_stats, 'w') as stats:
         stats.write('mapped\t{}\n'.format(read_types['mapped']))
         stats.write('unmapped\t{}\n'.format(read_types['unmapped']))
+
+    with open(args.failure_modes, 'w') as failures:
+        failures.write('alignment_length\t{}\n'.format(failure_modes['alignment_length']))
+        failures.write('alignment_score\t{}\n'.format(failure_modes['alignment_score']))
+        failures.write('bounds\t{}\n'.format(failure_modes['bounds']))
 
 
 if __name__ == "__main__":

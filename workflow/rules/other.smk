@@ -91,7 +91,7 @@ rule align_bwameth:
         # read1='results/{sample}/tmp/{sample}.read1.revcomp.fastq.gz',
         # read2='results/{sample}/tmp/{sample}.read2.revcomp.fastq.gz'
     output:
-        sam='results/{experiment}/{sample}/tmp/{sample}.bwameth.sam'
+        sam=temp('results/{experiment}/{sample}/tmp/{sample}.bwameth.sam')
     log:
         'results/{experiment}/{sample}/tmp/{sample}.bwameth.log'
     params:
@@ -117,7 +117,7 @@ rule align_bwameth_all:
         # read1='results/{sample}/tmp/{sample}.read1.revcomp.fastq.gz',
         # read2='results/{sample}/tmp/{sample}.read2.revcomp.fastq.gz'
     output:
-        sam='results/{experiment}/{sample}/tmp/{sample}.bwameth.all_alignments.sam'
+        sam=temp('results/{experiment}/{sample}/tmp/{sample}.bwameth.all_alignments.sam')
     params:
         threads=config.get('threads', 1)
     conda:
@@ -153,9 +153,10 @@ rule correct_mismatched_amplicons:
         fa='results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa'
         # bam='results/{experiment}/{sample}/tmp/{sample}.bwameth.all_alignments.sam'
     output:
-        bam='results/{experiment}/{sample}/tmp/{sample}.bwameth.contig_filtered.sam',
+        bam=temp('results/{experiment}/{sample}/tmp/{sample}.bwameth.contig_filtered.sam'),
         out_stats='results/{experiment}/{sample}/stats/{sample}.bwameth.contig_filtered.stats.txt',
-        problematic_reads='results/{experiment}/{sample}/tmp/{sample}.bwameth.problematic_reads.sam'
+        failure_modes='results/{experiment}/{sample}/stats/{sample}.bwameth.contig_filtered.failure_modes.txt',
+        problematic_reads=temp('results/{experiment}/{sample}/tmp/{sample}.bwameth.problematic_reads.sam')
     params:
         read1_thresh=lambda wildcards: int(samplesheet.loc[wildcards.sample,'read1_length'] * config['alignment_length_fraction']), #  config['read1_length_override'].get(wildcards.sample, config['read1_length_threshold']) if 'read1_length_override' in config.keys() else config['read1_length_threshold'],
         read2_thresh=lambda wildcards: int(samplesheet.loc[wildcards.sample,'read2_length'] * config['alignment_length_fraction']), # config['read2_length_override'].get(wildcards.sample, config['read2_length_threshold']) if 'read2_length_override' in config.keys() else config['read2_length_threshold'],
@@ -165,7 +166,7 @@ rule correct_mismatched_amplicons:
     conda:
         "envs/python3_v6.yaml"
     shell:
-        'python amplicon-smf/workflow/scripts/filter_bam_by_matching_contigs2.py --bam {input.bam} --out {output.bam} --out_stats {output.out_stats} --problem {output.problematic_reads} --amplicon {input.fa} --min_len_threshold1 {params.read1_thresh} --min_len_threshold2 {params.read2_thresh} --min_as_frac {params.as_thresh} {params.ignore_bounds} {params.write_problematic_reads}'
+        'python amplicon-smf/workflow/scripts/filter_bam_by_matching_contigs2.py --bam {input.bam} --out {output.bam} --out_stats {output.out_stats} --failure_modes {output.failure_modes} --problem {output.problematic_reads} --amplicon {input.fa} --min_len_threshold1 {params.read1_thresh} --min_len_threshold2 {params.read2_thresh} --min_as_frac {params.as_thresh} {params.ignore_bounds} {params.write_problematic_reads}'
 
 rule plot_mapped_vs_unmapped_reads:
     input:
