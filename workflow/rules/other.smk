@@ -325,11 +325,12 @@ rule plot_bulk_methylation:
     params:
         prefix='results/{experiment}/{sample}/{sample}.bwameth.filtered.sorted',
         cpg=lambda wildcards: '--include_cpg' if samplesheet.loc[wildcards.sample, 'include_cpg'] else '',
-        no_endog_meth=lambda wildcards: '--no_endog_meth' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else ''
+        no_endog_meth=lambda wildcards: '--no_endog_meth' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else '',
+        deaminase=lambda wildcards: '--deaminase' if samplesheet.loc[wildcards.sample, 'deaminase'] else ''
     conda:
         "envs/python3_v6.yaml"
     shell:
-        'python amplicon-smf/workflow/scripts/plot_bulk_methylation_signal.py --input {params.prefix} --amplicon {input.fa} --plot {output} {params.cpg} {params.no_endog_meth}'
+        'python amplicon-smf/workflow/scripts/plot_bulk_methylation_signal.py --input {params.prefix} --amplicon {input.fa} --plot {output} {params.cpg} {params.no_endog_meth} {params.deaminase}'
 
 rule amplicon_fa_to_peak_bed:
     input:

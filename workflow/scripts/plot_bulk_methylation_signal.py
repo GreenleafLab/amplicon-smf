@@ -12,7 +12,7 @@ import seaborn as sns
 from common import plot_bulk_smf_trace
 
 
-def plot_bulk_methylation(input_prefix, amplicon_fa, plots, thresh, include_cpg, no_endog_meth, save_individual_png):
+def plot_bulk_methylation(input_prefix, amplicon_fa, plots, thresh, include_cpg, no_endog_meth, deaminase, save_individual_png):
     # load amplicon fasta
     amplicon_to_seq_dict = {}
     
@@ -46,10 +46,13 @@ def plot_bulk_methylation(input_prefix, amplicon_fa, plots, thresh, include_cpg,
         gpcs = gpc_pos_dict[amplicon]
         cpgs = cpg_pos_dict[amplicon]
 
-        print(bedgraph_chg.loc[bedgraph_chg['chr']==amplicon])
+        # print(bedgraph_chg.loc[bedgraph_chg['chr']==amplicon])
 
         # join the tables
-        if include_cpg or no_endog_meth:
+        # figure out here what kinds of Cs we want! 
+        # here, we are just joining the tables, we still have to go in and fish out the GpCs or CpGs or Cs later
+        # so here it's just do we want to EXCLUDE CpG or not, which we only do if we JUST want GpC and there might be endog meth
+        if include_cpg or no_endog_meth or deaminase: 
             all_c_df = pd.concat([bedgraph_chg.loc[bedgraph_chg['chr']==amplicon], bedgraph_chh.loc[bedgraph_chh['chr']==amplicon], bedgraph_cpg.loc[bedgraph_cpg['chr']==amplicon]]).sort_values('start')
         else:
             all_c_df = pd.concat([bedgraph_chg.loc[bedgraph_chg['chr']==amplicon], bedgraph_chh.loc[bedgraph_chh['chr']==amplicon]]).sort_values('start')
@@ -70,11 +73,16 @@ def plot_bulk_methylation(input_prefix, amplicon_fa, plots, thresh, include_cpg,
             all_cpg_df = all_c_df.loc[all_c_df.start.isin(cpgs)].copy()
             all_other_c_df = all_c_df.loc[~all_c_df.start.isin(gpcs+cpgs)].copy()
 
-            # now construct the thing we will plot and return, based on whether or not we included CpG MTase
-            if include_cpg:
-                cs_to_plot = pd.concat([all_gpc_df, all_cpg_df]).sort_values('start')
+            # now construct the thing we will plot and return, based on whether or not we included CpG MTase or deaminase
+            if deaminase:
+                # all Cs!
+                cs_to_plot = all_c_df
             else:
-                cs_to_plot = all_gpc_df
+                # check whether we want to include CpG or not
+                if include_cpg:
+                    cs_to_plot = pd.concat([all_gpc_df, all_cpg_df]).sort_values('start')
+                else:
+                    cs_to_plot = all_gpc_df
 
             # plot bulk methyl signal
             plot_bulk_smf_trace(cs_to_plot, plots, title=amplicon, ylim=(0,103))
@@ -120,6 +128,7 @@ if __name__ == '__main__':
     parser.add_argument("--thresh", dest="thresh", type=int, default=100, help="How many times a C has to be observed before it is included in the output/plot")
     parser.add_argument('--include_cpg', dest='include_cpg', action='store_true', help="Whether to include CpGs along with GpCs")
     parser.add_argument('--no_endog_meth', dest='no_endog_meth', action='store_true', help="Whether GpCpGs are safe to consider or not")
+    parser.add_argument('--deaminase', dest='deaminase', action='store_true', help="Whether this was a deaminase experiment")
     parser.add_argument('--save_png', dest='save_individual_png', action='store_true', help="Save each individual plot as separate png")
     parser.set_defaults(save_individual_png=False)
 
@@ -129,4 +138,4 @@ if __name__ == '__main__':
 
     with PdfPages(args.plot_file) as plots:
         # plot_bulk_methylation(args.input, args.amplicon_fa, args.output, plots, args.thresh, args.save_individual_png)
-        plot_bulk_methylation(args.input, args.amplicon_fa, plots, args.thresh, args.include_cpg, args.no_endog_meth, args.save_individual_png)
+        plot_bulk_methylation(args.input, args.amplicon_fa, plots, args.thresh, args.include_cpg, args.no_endog_meth, args.deaminase, args.save_individual_png)

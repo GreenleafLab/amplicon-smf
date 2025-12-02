@@ -29,7 +29,8 @@ def plot_bulk_methylation(input_prefix, amplicon_fa, plots):
         # check whether this matrix was actually written
         if path.exists(matrix_path):
             # load matrix and convert -1s -> NAs for .mean()ing on columns
-            mat = load_single_molecule_matrix(matrix_path)
+            mat = load_single_molecule_matrix(matrix_path, every_other=False)
+            print(len(mat.loc[:,mat.mean() > 0].mean()))
             mat = mat.replace(-1,np.nan)
 
             average_methylation = 100 * mat.mean()
