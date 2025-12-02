@@ -47,22 +47,74 @@ rule reverse_complement_fastq:
         'cp {input.fq} {output}'
 
 def get_amplicon(wildcards):
-    amplicon = samplesheet.loc[wildcards.sample, 'amplicon_fa']
-    return amplicon
+    return samplesheet.loc[wildcards.sample, "amplicon_fa"]
 
 rule reverse_complement_fasta:
     input:
         get_amplicon
     output:
-        'results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa'
+        "results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa"
     params:
-        rc_or_not=lambda wildcards: 'fastx_reverse_complement -i - -o' if samplesheet.loc[wildcards.sample,'bottom_strand'] else 'cat > '
+        # 1 = reverse-complement, 0 = just uppercase
+        rc_flag=lambda wildcards: 1 if samplesheet.loc[wildcards.sample, "bottom_strand"] else 0
     conda:
         "envs/python3_v6.yaml"
     shell:
-        # "ml fastx_toolkit/0.0.14; awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | fastx_reverse_complement -i - -o {output}"
-        # "ml fastx_toolkit/0.0.14; awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | {params.rc_or_not} {output}"
-        "awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | {params.rc_or_not} {output}"
+        r"""
+        awk -v rc={params.rc_flag} '
+            BEGIN {{
+                comp["A"]="T"; comp["T"]="A"; comp["G"]="C"; comp["C"]="G";
+                comp["a"]="T"; comp["t"]="A"; comp["g"]="C"; comp["c"]="G";
+                comp["N"]="N"; comp["n"]="N";
+            }}
+            /^>/ {{
+                # If we already collected a previous record, flush it
+                if (NR > 1) {{
+                    if (rc == 1) {{
+                        # reverse complement, uppercase
+                        n = length(seq);
+                        rev = "";
+                        for (i = n; i >= 1; i--) {{
+                            b = toupper(substr(seq, i, 1));
+                            if (b in comp) rev = rev comp[b];
+                            else rev = rev "N";
+                        }}
+                        print header;
+                        print rev;
+                    }} else {{
+                        # just uppercase
+                        print header;
+                        print toupper(seq);
+                    }}
+                }}
+                header = $0;
+                seq = "";
+                next;
+            }}
+            /^[^>]/ {{
+                seq = seq $0;
+                next;
+            }}
+            END {{
+                if (header != "") {{
+                    if (rc == 1) {{
+                        n = length(seq);
+                        rev = "";
+                        for (i = n; i >= 1; i--) {{
+                            b = toupper(substr(seq, i, 1));
+                            if (b in comp) rev = rev comp[b];
+                            else rev = rev "N";
+                        }}
+                        print header;
+                        print rev;
+                    }} else {{
+                        print header;
+                        print toupper(seq);
+                    }}
+                }}
+            }}
+        ' {input} > {output}
+        """
 
 rule index_fasta:
     input:
@@ -282,21 +334,16 @@ rule join_reads_and_first_cluster:
         peaks='results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.peaklist.bed'
     output:
         'results/{experiment}/{sample}/{sample}.amplicon_stats.txt'
-        # full='results/{experiment}/{sample}/matrices/{sample}.{amplicon}.full_unclustered.matrix',
-        # clustered='results/{experiment}/{sample}/matrices/{sample}.{amplicon}.clustered.matrix'
     params:
         prefix='results/{experiment}/{sample}/matrices/{sample}',
         matdir='results/{experiment}/{sample}/matrices',
-        # amplicon=lambda wildcards: wildcards.amplicon.split('_')[0],
         subset=1000,
         ctype=lambda wildcards: 'both' if samplesheet.loc[wildcards.sample,'include_cpg'] else 'GC',
         no_endog_meth=lambda wildcards: '-noEndogenousMethylation' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else ''
     conda:
-        "envs/python2_v2.yaml"
+        "envs/python3_v6.yaml"
     shell:
-        'mkdir -p {params.matdir}; python amplicon-smf/workflow/scripts/dSMF-footprints_optional_clustering.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap amplicon-smf/workflow/scripts/heatmap.py 10 3 binary 10,100'#  -minCov 0.8'
-        # 'mkdir -p {params.matdir}; ml python/2.7.13; set +u; source $HOME/bin/VENV/VIRTUALENV_2.7.13_SAMSTATS/bin/activate; set -u; python amplicon-smf/workflow/scripts/dSMF-footprints_optional_clustering.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap amplicon-smf/workflow/scripts/heatmap.py 10 3 binary 10,100'#  -minCov 0.8'
-        # 'ml python/2.7.13; set +u; source $HOME/bin/VENV/VIRTUALENV_2.7.13_SAMSTATS/bin/activate; set -u; python amplicon-smf/workflow/scripts/dSMF-footprints_optional_clustering.py {input.bam} {input.fa} GC {input.peaks} 0 1 2 3 {params.prefix} {params.amplicon} -unstranded -subset {params.subset} -cluster -heatmap amplicon-smf/workflow/scripts/heatmap.py 10 3 binary 10,100 -minCov 0.8'
+        'mkdir -p {params.matdir}; python amplicon-smf/workflow/scripts/dSMF_footprints_clustering_py3.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap'
 
 rule plot_bulk_methylation2:
     input:
