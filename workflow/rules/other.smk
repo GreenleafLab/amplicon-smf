@@ -53,68 +53,82 @@ rule reverse_complement_fasta:
     input:
         get_amplicon
     output:
-        "results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa"
+        'results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa'
     params:
-        # 1 = reverse-complement, 0 = just uppercase
-        rc_flag=lambda wildcards: 1 if samplesheet.loc[wildcards.sample, "bottom_strand"] else 0
+        rc_or_not=lambda wildcards: 'fastx_reverse_complement -i - -o' if samplesheet.loc[wildcards.sample,'bottom_strand'] else 'cat > '
     conda:
         "envs/python3_v6.yaml"
     shell:
-        r"""
-        awk -v rc={params.rc_flag} '
-            BEGIN {{
-                comp["A"]="T"; comp["T"]="A"; comp["G"]="C"; comp["C"]="G";
-                comp["a"]="T"; comp["t"]="A"; comp["g"]="C"; comp["c"]="G";
-                comp["N"]="N"; comp["n"]="N";
-            }}
-            /^>/ {{
-                # If we already collected a previous record, flush it
-                if (NR > 1) {{
-                    if (rc == 1) {{
-                        # reverse complement, uppercase
-                        n = length(seq);
-                        rev = "";
-                        for (i = n; i >= 1; i--) {{
-                            b = toupper(substr(seq, i, 1));
-                            if (b in comp) rev = rev comp[b];
-                            else rev = rev "N";
-                        }}
-                        print header;
-                        print rev;
-                    }} else {{
-                        # just uppercase
-                        print header;
-                        print toupper(seq);
-                    }}
-                }}
-                header = $0;
-                seq = "";
-                next;
-            }}
-            /^[^>]/ {{
-                seq = seq $0;
-                next;
-            }}
-            END {{
-                if (header != "") {{
-                    if (rc == 1) {{
-                        n = length(seq);
-                        rev = "";
-                        for (i = n; i >= 1; i--) {{
-                            b = toupper(substr(seq, i, 1));
-                            if (b in comp) rev = rev comp[b];
-                            else rev = rev "N";
-                        }}
-                        print header;
-                        print rev;
-                    }} else {{
-                        print header;
-                        print toupper(seq);
-                    }}
-                }}
-            }}
-        ' {input} > {output}
-        """
+        # "ml fastx_toolkit/0.0.14; awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | fastx_reverse_complement -i - -o {output}"
+        # "ml fastx_toolkit/0.0.14; awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | {params.rc_or_not} {output}"
+        "awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | {params.rc_or_not} {output}"
+
+# rule reverse_complement_fasta:
+#     input:
+#         get_amplicon
+#     output:
+#         "results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa"
+#     params:
+#         # 1 = reverse-complement, 0 = just uppercase
+#         rc_flag=lambda wildcards: 1 if samplesheet.loc[wildcards.sample, "bottom_strand"] else 0
+#     conda:
+#         "envs/python3_v6.yaml"
+#     shell:
+#         r"""
+#         awk -v rc={params.rc_flag} '
+#             BEGIN {{
+#                 comp["A"]="T"; comp["T"]="A"; comp["G"]="C"; comp["C"]="G";
+#                 comp["a"]="T"; comp["t"]="A"; comp["g"]="C"; comp["c"]="G";
+#                 comp["N"]="N"; comp["n"]="N";
+#             }}
+#             /^>/ {{
+#                 # If we already collected a previous record, flush it
+#                 if (NR > 1) {{
+#                     if (rc == 1) {{
+#                         # reverse complement, uppercase
+#                         n = length(seq);
+#                         rev = "";
+#                         for (i = n; i >= 1; i--) {{
+#                             b = toupper(substr(seq, i, 1));
+#                             if (b in comp) rev = rev comp[b];
+#                             else rev = rev "N";
+#                         }}
+#                         print header;
+#                         print rev;
+#                     }} else {{
+#                         # just uppercase
+#                         print header;
+#                         print toupper(seq);
+#                     }}
+#                 }}
+#                 header = $0;
+#                 seq = "";
+#                 next;
+#             }}
+#             /^[^>]/ {{
+#                 seq = seq $0;
+#                 next;
+#             }}
+#             END {{
+#                 if (header != "") {{
+#                     if (rc == 1) {{
+#                         n = length(seq);
+#                         rev = "";
+#                         for (i = n; i >= 1; i--) {{
+#                             b = toupper(substr(seq, i, 1));
+#                             if (b in comp) rev = rev comp[b];
+#                             else rev = rev "N";
+#                         }}
+#                         print header;
+#                         print rev;
+#                     }} else {{
+#                         print header;
+#                         print toupper(seq);
+#                     }}
+#                 }}
+#             }}
+#         ' {input} > {output}
+#         """
 
 rule index_fasta:
     input:
@@ -275,7 +289,7 @@ rule filter_uncoverted:
         bam='results/{experiment}/{sample}/{sample}.bwameth.filtered.bam',
         plot='results/{experiment}/plots/{sample}.nonconverted_reads.png'
     params:
-        cfrac=config.get('unconverted_frac', 0.85)
+        cfrac=lambda wildcards: 0.001 if samplesheet.loc[wildcards.sample, 'deaminase'] else config.get('unconverted_frac', 0.85) 
     conda:
         "envs/python3_v6.yaml"
     shell:
@@ -327,6 +341,15 @@ rule amplicon_fa_to_peak_bed:
     shell:
         'python amplicon-smf/workflow/scripts/convert_amplicon_fa_to_peaklist.py {input} {output}'
 
+def get_c_type(wildcards):
+    if samplesheet.loc[wildcards.sample,'deaminase']:
+        return 'allC'
+    else:
+        if samplesheet.loc[wildcards.sample,'include_cpg']:
+            return 'both_dimers'
+        else:
+            return 'GC'
+
 rule join_reads_and_first_cluster:
     input:
         bam='results/{experiment}/{sample}/{sample}.bwameth.filtered.sorted.bam',
@@ -338,7 +361,8 @@ rule join_reads_and_first_cluster:
         prefix='results/{experiment}/{sample}/matrices/{sample}',
         matdir='results/{experiment}/{sample}/matrices',
         subset=1000,
-        ctype=lambda wildcards: 'both' if samplesheet.loc[wildcards.sample,'include_cpg'] else 'GC',
+        # ctype=lambda wildcards: 'both' if samplesheet.loc[wildcards.sample,'include_cpg'] else 'GC',
+        ctype=get_c_type,
         no_endog_meth=lambda wildcards: '-noEndogenousMethylation' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else ''
     conda:
         "envs/python3_v6.yaml"

@@ -2,8 +2,10 @@
 
 ## Authors
 - Ben Doughty @bdoughty
+- Georgi Marinov @georgimarinov
 - Jason Tan @yj-tan
 - Julia Schaepe @juliaschaepe
+- Vinson Fan @vinsfan368
 
 ## Overview:
 The code here takes paired-end FASTQs from an amplicon SMF experiment and analyzes the single reads for methylation state. It returns both bulk measurements and single-molecule measurements, and the repo has additional code for downstream plotting. There are also scripts in `workflow/scripts` for calling binding (`classify_single_molecule_binding_v2.py`) and fitting the partition function model (`fit_partition_function_model_v3.py`).

@@ -30,6 +30,8 @@ if 'read2_length' not in samplesheet.columns:
     samplesheet['read2_length'] = config['read2_length']
 if 'bottom_strand' not in samplesheet.columns:
     samplesheet['bottom_strand'] = True
+if 'deaminase' not in samplesheet.columns:
+    samplesheet['deaminase'] = False
 
 # validate(samples, schema="../schemas/samples.schema.yaml")
 
