@@ -362,7 +362,6 @@ rule join_reads_and_first_cluster:
         prefix='results/{experiment}/{sample}/matrices/{sample}',
         matdir='results/{experiment}/{sample}/matrices',
         subset=1000,
-        # ctype=lambda wildcards: 'both' if samplesheet.loc[wildcards.sample,'include_cpg'] else 'GC',
         ctype=get_c_type,
         no_endog_meth=lambda wildcards: '-noEndogenousMethylation' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else ''
     conda:

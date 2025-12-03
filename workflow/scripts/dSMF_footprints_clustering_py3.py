@@ -46,9 +46,9 @@ def parse_args():
     p.add_argument("-unstranded", action="store_true",
                    help="Ignore strand; treat all regions as '+'")
     p.add_argument("-heatmap", action="store_true",
-                   help="Generate heatmap PNG")
+                   help="Generate heatmap PNG, requires -cluster")
     p.add_argument("-cluster", action="store_true",
-                   help="Cluster rows with Ward linkage (distance threshold=0)")
+                   help="Cluster rows with sklearn k-means on Cs")
     p.add_argument("-dedup", action="store_true", default=False,
                    help="Deduplicate rows with identical C protection patterns before clustering and plotting")
     return p.parse_args()
@@ -129,7 +129,9 @@ def merge_alignments(
                 # conflict between two informative bases
                 if prefer_ref_on_conflict:
                     # choose base matching reference if possible
-                    ref_base = ref[(min_r - region_start) + j] if 0 <= (min_r - region_start) + j < len(ref) else None
+                    ref_idx = (min_r - region_start) + j
+                    ref_base = ref[ref_idx] if 0 <= ref_idx < len(ref) else None  
+
                     if ref_base == b:
                         buf[j] = b
                     elif ref_base == buf[j]:
@@ -200,7 +202,7 @@ def score_read_against_region(
     # Decide which positions to score
     score_pos = np.zeros(L, dtype=bool)
 
-    # allCs mode: just every cytosine in the region
+    # allCs mode: every cytosine in the region
     if c_type == "allC":
         score_pos |= (ref_arr == b"C")
 
@@ -223,12 +225,11 @@ def score_read_against_region(
                     c_pos = i + 1
                     score_pos[c_pos] = True
 
-    # Now actually score the read bases at those positions
+    # Actually score the read bases at those positions
     for i in range(ovl_start, ovl_end):
         if not score_pos[i]:
             continue
-        # read-relative index of this genomic base
-        rr = (region_start + i) - rstart
+        rr = (region_start + i) - rstart    # read-relative index of this base
         if not (0 <= rr < len(rseq)):
             continue
         base = rseq[rr]
@@ -243,12 +244,7 @@ def cluster_rows_kmeans(X: np.ndarray, n_clusters: int = 4):
 
     - Enforces column rule: keep only columns with no -1 anywhere.
       (Columns with any -1 → dropped; columns with all -1 → dropped.)
-    - Returns (labels, order):
-        labels : 1..k cluster labels (np.int32)
-        order  : row permutation, sorted by (cluster id, distance to its center)
-
-    If nothing informative remains (no kept columns) or n<=1,
-    returns labels=all ones and identity order.
+    - Returns (labels, order)
     """
     n = X.shape[0]
     if n <= 1 or X.size == 0:
@@ -295,7 +291,7 @@ def qc_dedup(arr: np.ndarray, do_dedup: bool=False):
     Returns: total, unique_states, kept_idx, matrix_out
     """
     if arr.ndim != 2 or arr.size == 0:
-        return 0, 0, float("nan"), np.array([], dtype=np.int64), arr
+        return 0, 0, np.array([], dtype=np.int64), arr
 
     total = arr.shape[0]
     row_view = arr.view(np.dtype((np.void, arr.dtype.itemsize * arr.shape[1])))
@@ -309,6 +305,103 @@ def qc_dedup(arr: np.ndarray, do_dedup: bool=False):
     
     return total, unique_states, np.arange(total, dtype=np.int64), arr
 
+def subset_and_cluster(
+    all_scores: np.ndarray,
+    ids: List[str],
+    cover_counts: List[int],
+    subset: Optional[int],
+    n_clusters: int = 4,
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    """
+    Apply optional coverage-based subsetting and k-means clustering.
+
+    Returns:
+      clust_scores : (n_rows_subset, n_cols) int array
+      labels       : (n_rows_subset,) int cluster labels (1..k)
+      ids_out      : list of IDs in clustered order
+    """
+    if all_scores.size == 0 or len(ids) == 0:
+        return all_scores, np.ones(0, dtype=int), ids
+
+    scores = all_scores
+    ids_out = list(ids)
+    cov = np.asarray(cover_counts, dtype=float)
+
+    # Optional subsetting by coverage
+    if subset is not None and scores.shape[0] > subset:
+        order = np.argsort(-cov)  # descending
+        cutoff_cov = cov[order[subset - 1]]
+        top_mask = cov >= cutoff_cov
+        top_idx = np.where(top_mask)[0]
+        if top_idx.size > subset:
+            strict_idx = np.where(cov > cutoff_cov)[0]
+            need = subset - strict_idx.size
+            tied_idx = np.where(cov == cutoff_cov)[0]
+            pick = np.random.choice(tied_idx, size=need, replace=False)
+            final_idx = np.concatenate([strict_idx, pick])
+        else:
+            final_idx = top_idx
+        final_idx.sort()
+        scores = scores[final_idx]
+        ids_out = [ids_out[i] for i in final_idx]
+
+    # Cluster
+    if scores.shape[0] <= 1:
+        labels = np.ones(scores.shape[0], dtype=int)
+        return scores, labels, ids_out
+
+    labels, order = cluster_rows_kmeans(scores, n_clusters=n_clusters)
+    scores = scores[order]
+    labels = labels[order]
+    ids_out = [ids_out[i] for i in order]
+
+    return scores, labels, ids_out
+
+
+def make_heatmap(all_scores: np.ndarray, out_png: str):
+    """
+    Draw a binary heatmap (0/1 with -1 as transparent) roughly matching
+    Georgi's heatmap.py layout logic.
+    """
+    if all_scores.size == 0:
+        return
+
+    xps = 10.0      # x pixel size
+    yps = 3.0       # y pixel size
+    inches = 10.0   # figure width in inches
+
+    plot_arr = all_scores.astype(float)
+    plot_arr[plot_arr < 0] = np.nan
+    plot_masked = np.ma.masked_invalid(plot_arr)
+
+    n_rows, n_cols = plot_masked.shape
+    if n_rows == 0 or n_cols == 0:
+        return
+
+    height_px = n_rows * yps
+    width_px = n_cols * xps
+    height_inches = inches * (height_px / width_px)
+
+    cmap = plt.get_cmap("binary").copy()
+    cmap.set_bad((1.0, 1.0, 1.0, 0.0))  # NaNs transparent
+
+    fig, ax = plt.subplots(figsize=(inches, height_inches), dpi=600)
+    ax.imshow(
+        plot_masked,
+        cmap=cmap,
+        vmin=0.0,
+        vmax=1.0,
+        aspect="auto",
+        interpolation="nearest",
+    )
+    ax.set_axis_off()
+    fig.patch.set_alpha(0.0)
+
+    plt.savefig(out_png, dpi=600, transparent=True,
+                bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+
+
 def main():
     args = parse_args()
     bam = pysam.AlignmentFile(args.bam, "rb")
@@ -316,12 +409,12 @@ def main():
 
     with open(args.out_qc_file, "w") as out_qc, open(args.peaks) as pl:
         out_qc.write("amplicon\ttotal_reads\tobserved_states\treads_per_state\n")
+
         for raw in pl:
-            # Skip empty lines and lines starting with '#'
-            if (not raw.strip()) or (raw.startswith("#")):
+            # Skip empty lines and comments
+            if (not raw.strip()) or raw.startswith("#"):
                 continue
-            
-            # Try to unpack each line of FA, skip bad lines
+
             fields = raw.rstrip("\n").split("\t")
             try:
                 chrom = fields[args.chr_col]
@@ -331,23 +424,20 @@ def main():
             except Exception as e:
                 print(f"Skipping bad line: {raw.strip()} ({e})", file=sys.stderr)
                 continue
-            
-            # Decide how to label
+
             if args.label_col is not None and args.label_col < len(fields):
                 label = fields[args.label_col]
             else:
                 label = f"{chrom}_{start}-{end}_{'for' if strand == '+' else 'rev'}"
 
-            # Check for non-empty region
-            region_len = end - start
-            if region_len <= 0:
+            if (end - start) <= 0:
                 print(f"Skipping empty region: {label}", file=sys.stderr)
                 continue
 
-            # Reference & masks
+            # Reference
             ref = fa.fetch(chrom, start, end).upper()
-            
-            # Collect alignments overlapping region and put in DF
+
+            # Collect alignments overlapping region
             rows = []
             for aln in bam.fetch(chrom, start, end):
                 if aln.is_unmapped:
@@ -356,33 +446,37 @@ def main():
                 if not rseq:
                     continue
                 rows.append({"qname": aln.query_name, "rstart": r0, "seq": rseq})
-            
-            # Put in DF
+
             if not rows:
                 print(f"No reads for: {label}")
                 continue
+
             df = pd.DataFrame(rows)
 
-            # Group and score
-            scores_list = []
-            cover_counts = []
-            ids = []
-            # Group by read id; each group may have 2 forward segments with slight overlap
+            # Group and score per read ID
+            scores_list: List[np.ndarray] = []
+            cover_counts: List[int] = []
+            ids: List[str] = []
+
             for qname, g in df.groupby("qname", sort=False):
                 segs = list(zip(g["rstart"].to_numpy(), g["seq"].to_numpy()))
-                rstart_m, seq_m, _ = merge_alignments(segs,
-                                                      region_start=start,
-                                                      ref=ref,
-                                                      prefer_ref_on_conflict=True)
+                rstart_m, seq_m, cov_m = merge_alignments(
+                    segs,
+                    region_start=start,
+                    ref=ref,
+                    prefer_ref_on_conflict=True,
+                )
                 if not seq_m:
                     continue
-                sc, cov = score_read_against_region(rstart_m,   # read start
-                                                    seq_m,      # merged seq
-                                                    start,      # region start      
-                                                    args.c_type,
-                                                    args.noEndogenousMethylation,
-                                                    ref)
 
+                sc, cov = score_read_against_region(
+                    rstart_m,
+                    seq_m,
+                    start,
+                    args.c_type,
+                    args.noEndogenousMethylation,
+                    ref,
+                )
                 if sc is None:
                     continue
                 if (args.minCov is not None) and (cov.mean() < args.minCov):
@@ -395,102 +489,50 @@ def main():
             if not scores_list:
                 print(f"No reads retained for: {label}")
                 continue
-            
-            # TODO: test this block more thoroughly
-            # Subset best-covered reads if requested (stable, tie-aware)
-            if args.subset is not None and len(scores_list) > args.subset:
-                cov = np.asarray(cover_counts)
-                order = np.argsort(-cov)  # descending by coverage
-                cutoff_cov = cov[order[args.subset-1]]
-                top_mask = cov >= cutoff_cov
-                top_idx = np.where(top_mask)[0]
-                # if too many due to ties, randomly sample among the tied boundary
-                if top_idx.size > args.subset:
-                    # keep strictly > cutoff, and sample the rest
-                    strict_idx = np.where(cov > cutoff_cov)[0]
-                    need = args.subset - strict_idx.size
-                    tied_idx = np.where(cov == cutoff_cov)[0]
-                    pick = np.random.choice(tied_idx, size=need, replace=False)
-                    final_idx = np.concatenate([strict_idx, pick])
-                else:
-                    final_idx = top_idx
-                final_idx.sort()
-                scores_list = [scores_list[i] for i in final_idx]
-                ids         = [ids[i] for i in final_idx]
-            
-            # Make array, write some QC metrics, dedup if requested
-            all_scores = np.vstack(scores_list).astype(int, copy=False)
-            total, uniq, kept_idx, all_scores = qc_dedup(all_scores, do_dedup=args.dedup)
-            ids = [ids[i] for i in kept_idx]  # keep IDs in sync
-            out_qc.write(f"{label}\t{total}\t{uniq}\t{total/uniq:.2f}\n")
+
+            # 1) Generate scores matrix, dedup if requested, write stats + full matrix
+            scores_arr = np.vstack(scores_list).astype(int, copy=False)
+            total, uniq, kept_idx, scores_full = qc_dedup(scores_arr, do_dedup=args.dedup)
+
+            # Keep IDs and coverage in sync with full matrix (post-dedup)
+            ids_full = [ids[i] for i in kept_idx]
+            cov_full = [cover_counts[i] for i in kept_idx]
+
+            reads_per_state = (total / uniq) if uniq > 0 else float("nan")
+            out_qc.write(f"{label}\t{total}\t{uniq}\t{reads_per_state:.2f}\n")
             out_qc.flush()
 
-            # Write full (unclustered) matrix
             full_path = f"{args.out_prefix}.{label}.full_unclustered.matrix"
-            write_matrix(full_path, chrom, start, end, all_scores, ids, strand)
+            write_matrix(full_path, chrom, start, end, scores_full, ids_full, strand)
             print(f"Wrote full matrix: {full_path}")
 
-            # Optional clustered matrix
-            if args.cluster and len(all_scores) > 1:
-                labels, order = cluster_rows_kmeans(all_scores, n_clusters=4)
-                all_scores = all_scores[order]
-                ids        = [ids[i] for i in order]
-                labels     = labels[order]
+            # 2) Subset + cluster if requested
+            if args.cluster and scores_full.shape[0] > 1:
+                clust_scores, labels, ids_clust = subset_and_cluster(
+                    scores_full,
+                    ids_full,
+                    cov_full,
+                    args.subset,
+                    n_clusters=4,
+                )
 
                 clust_path = f"{args.out_prefix}.{label}.clustered.matrix"
                 header = "#" + chrom + "".join(f"\t{i}" for i in range(start, end))
                 with open(clust_path, "w") as fh:
                     fh.write(header + "\n")
-                    mat = all_scores[:, ::-1] if strand == "-" else all_scores
-                    for lab, rid, row in zip(labels, ids, mat):
+                    mat = clust_scores[:, ::-1] if strand == "-" else clust_scores
+                    for lab, row in zip(labels, mat):
                         fh.write(f"{lab}\t" + "\t".join(map(str, row.tolist())) + "\n")
                 print(f"Wrote clustered matrix: {clust_path}")
 
-                # Optional heatmap
+                # 3) Heatmap on clustered matrix if requested
                 if args.heatmap:
-                    xps = 10.0      # x pixel size
-                    yps = 3.0       # y pixel size
-                    inches = 10.0   # figure width in inches
-
-                    # Convert to float and mask -1 as np.nan
-                    plot_arr = all_scores.astype(float)
-                    plot_arr[plot_arr < 0] = np.nan
-                    plot_masked = np.ma.masked_invalid(plot_arr)
-
-                    # Check if there's anything to plot
-                    n_rows, n_cols = plot_masked.shape
-                    if n_rows == 0 or n_cols == 0:
-                        continue
-
-                    # Match old script: Height = n_rows*yps, Width = n_cols*xps,
-                    # fig size = (inches, inches * Height/Width)
-                    height_px = n_rows * yps
-                    width_px = n_cols * xps
-                    height_inches = inches * (height_px / width_px)
-
-                    # 'binary' colormap with NaNs transparent
-                    cmap = plt.get_cmap("binary").copy()
-                    cmap.set_bad((1.0, 1.0, 1.0, 0.0))  # RGBA, alpha=0 for NaNs
-
-                    fig, ax = plt.subplots(figsize=(inches, height_inches), dpi=600)
-                    ax.imshow(
-                        plot_masked,
-                        cmap=cmap,
-                        vmin=0.0,
-                        vmax=1.0,
-                        aspect="auto",
-                        interpolation="nearest"
-                    )
-                    ax.set_axis_off()
-                    fig.patch.set_alpha(0.0)  # transparent figure background
-
                     out_png = f"{args.out_prefix}.{label}.matrix.png"
-                    plt.savefig(out_png, dpi=600, transparent=True, 
-                                bbox_inches="tight", pad_inches=0)
-                    plt.close(fig)
+                    make_heatmap(clust_scores, out_png)
 
     bam.close()
     fa.close()
+
 
 if __name__ == "__main__":
     main()
