@@ -10,40 +10,19 @@ rule fastqc:
     shell:
         'fastqc -o {params.outdir} -f fastq {input}; touch {output}'
 
-# rule fastqc:
-#     input:
-#         ''
-#     output:
-#         'results/qc/fastqc/{read}_fastqc.html'
-#     conda:
-#         "envs/python3_v7.yaml"
-#     params:
-#         outdir='results/qc/fastqc'
-#     shell:
-#         'fastqc -o {params.outdir} -f fastq {input}; touch {output}'
-
 def get_fastq(wildcards):
-    # bottom_strand = samplesheet.loc[wildcards.sample,'bottom_strand']
-    # if bottom_strand:
-    #     fastq_col = 'fastq_R{}'.format(3-int(wildcards.read))
-    # else:
-    #     fastq_col = 'fastq_R{}'.format(wildcards.read)
-    # fastq_col = 'fastq_R{}'.format(wildcards.read)
     fastq_col = 'fastq_R{}'.format(3-int(wildcards.read))
     fastq = samplesheet.loc[wildcards.sample, fastq_col]
     return fastq
 
 rule reverse_complement_fastq:
     input:
-        fq=get_fastq#,
-        #fa='results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa'
+        fq=get_fastq
     output:
-        # 'results/{sample}/tmp/{sample}.read{read}.revcomp.fastq.gz'
         temp('results/{experiment}/{sample}/tmp/{sample}_revcomp_R{read}_001.fastq.gz')
     conda:
         "envs/python3_v7.yaml"
     shell:
-        # 'ml fastx_toolkit/0.0.14; zcat {input.fq} | fastx_reverse_complement -i - -Q33 -z > {output}'
         'cp {input.fq} {output}'
 
 def get_amplicon(wildcards):
@@ -59,76 +38,7 @@ rule reverse_complement_fasta:
     conda:
         "envs/python3_v7.yaml"
     shell:
-        # "ml fastx_toolkit/0.0.14; awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | fastx_reverse_complement -i - -o {output}"
-        # "ml fastx_toolkit/0.0.14; awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | {params.rc_or_not} {output}"
         "awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | {params.rc_or_not} {output}"
-
-# rule reverse_complement_fasta:
-#     input:
-#         get_amplicon
-#     output:
-#         "results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa"
-#     params:
-#         # 1 = reverse-complement, 0 = just uppercase
-#         rc_flag=lambda wildcards: 1 if samplesheet.loc[wildcards.sample, "bottom_strand"] else 0
-#     conda:
-#         "envs/python3_v7.yaml"
-#     shell:
-#         r"""
-#         awk -v rc={params.rc_flag} '
-#             BEGIN {{
-#                 comp["A"]="T"; comp["T"]="A"; comp["G"]="C"; comp["C"]="G";
-#                 comp["a"]="T"; comp["t"]="A"; comp["g"]="C"; comp["c"]="G";
-#                 comp["N"]="N"; comp["n"]="N";
-#             }}
-#             /^>/ {{
-#                 # If we already collected a previous record, flush it
-#                 if (NR > 1) {{
-#                     if (rc == 1) {{
-#                         # reverse complement, uppercase
-#                         n = length(seq);
-#                         rev = "";
-#                         for (i = n; i >= 1; i--) {{
-#                             b = toupper(substr(seq, i, 1));
-#                             if (b in comp) rev = rev comp[b];
-#                             else rev = rev "N";
-#                         }}
-#                         print header;
-#                         print rev;
-#                     }} else {{
-#                         # just uppercase
-#                         print header;
-#                         print toupper(seq);
-#                     }}
-#                 }}
-#                 header = $0;
-#                 seq = "";
-#                 next;
-#             }}
-#             /^[^>]/ {{
-#                 seq = seq $0;
-#                 next;
-#             }}
-#             END {{
-#                 if (header != "") {{
-#                     if (rc == 1) {{
-#                         n = length(seq);
-#                         rev = "";
-#                         for (i = n; i >= 1; i--) {{
-#                             b = toupper(substr(seq, i, 1));
-#                             if (b in comp) rev = rev comp[b];
-#                             else rev = rev "N";
-#                         }}
-#                         print header;
-#                         print rev;
-#                     }} else {{
-#                         print header;
-#                         print toupper(seq);
-#                     }}
-#                 }}
-#             }}
-#         ' {input} > {output}
-#         """
 
 rule index_fasta:
     input:
@@ -143,8 +53,6 @@ rule index_fasta:
         "envs/python3_v7.yaml"
     shell:
         'amplicon-smf/workflow/scripts/bwameth.py index {input.fa}'
-        # 'ml python/2.7.13; set +u; source $HOME/bin/VENV/VIRTUALENV_2.7.13_SAMSTATS/bin/activate; set -u; $HOME/bin/copy_from_georgi/bwameth.py index {input.fa}'
-        # '$HOME/bin/bwa-meth/bwameth.py index {input.fa}'
 
 rule align_bwameth:
     input:
@@ -154,8 +62,6 @@ rule align_bwameth:
         amplicon_index_tmp2='results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa.bwameth.c2t.sa', 
         read1='results/{experiment}/{sample}/tmp/{sample}_revcomp_R1_001.fastq.gz',
         read2='results/{experiment}/{sample}/tmp/{sample}_revcomp_R2_001.fastq.gz'
-        # read1='results/{sample}/tmp/{sample}.read1.revcomp.fastq.gz',
-        # read2='results/{sample}/tmp/{sample}.read2.revcomp.fastq.gz'
     output:
         sam=temp('results/{experiment}/{sample}/tmp/{sample}.bwameth.sam')
     log:
@@ -165,12 +71,7 @@ rule align_bwameth:
     conda:
         "envs/python3_v7.yaml"
     shell:
-        # '/oak/stanford/groups/wjg/bgrd/scripts_share/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
-        # '/oak/stanford/groups/wjg/bgrd/scripts_share/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} | grep -v "[W::sam_parse1]" > {output.sam}'
         'amplicon-smf/workflow/scripts/bwameth_nobenedit.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam} 2> {log} || (echo "align_bwameth failed; stderr follows:" >&2 ; cat {log} >&2 ; exit 1)'
-        # '$HOME/bin/copy_from_georgi/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
-        # 'ml python/2.7.13; set +u; source $HOME/bin/VENV/VIRTUALENV_2.7.13_SAMSTATS/bin/activate; set -u; $HOME/bin/copy_from_georgi/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
-        # '$HOME/bin/bwa-meth/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
 
 rule align_bwameth_all:
     input:
@@ -180,8 +81,6 @@ rule align_bwameth_all:
         amplicon_index_tmp2='results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa.bwameth.c2t.sa', 
         read1='results/{experiment}/{sample}/tmp/{sample}_revcomp_R1_001.fastq.gz',
         read2='results/{experiment}/{sample}/tmp/{sample}_revcomp_R2_001.fastq.gz'
-        # read1='results/{sample}/tmp/{sample}.read1.revcomp.fastq.gz',
-        # read2='results/{sample}/tmp/{sample}.read2.revcomp.fastq.gz'
     output:
         sam=temp('results/{experiment}/{sample}/tmp/{sample}.bwameth.all_alignments.sam')
     params:
@@ -189,21 +88,7 @@ rule align_bwameth_all:
     conda:
         "envs/python3_v7.yaml"
     shell:
-        #'ml python/2.7.13; set +u; source $HOME/bin/VENV/VIRTUALENV_2.7.13_SAMSTATS/bin/activate; set -u; $HOME/bin/copy_from_georgi/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
         'amplicon-smf/workflow/scripts/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
-        # 'amplicon-smf/workflow/scripts/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} | grep -v "[W::sam_parse1]" > {output.sam}'
-        # 'ml python/2.7.13; set +u; source $HOME/bin/VENV/VIRTUALENV_2.7.13_SAMSTATS/bin/activate; set -u; /oak/stanford/groups/wjg/bgrd/projects/smf/210817_smf_code_rewrite_reanalysis/210825_rerun_all_smf_snakemake/pipeline_test/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
-        # 'amplicon-smf/workflow/scripts/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam}'
-
-# rule filter_sam_file:
-#     input: 
-#         'results/{experiment}/{sample}/tmp/{sample}.bwameth.all_alignments.sam'
-#     output:
-#         'results/{experiment}/{sample}/tmp/{sample}.bwameth.all_alignments.filtered.sam'
-#     conda:
-#         "envs/python3_v7.yaml"
-#     shell:
-#         'samtools view {input} | grep -v "[W::sam_parse1]" > {output}'
 
 # need this to determine whether we should filter out the contigs like 0x-5x or do normal
 def choose_bwameth_version(wildcards):
@@ -247,13 +132,6 @@ rule plot_mapped_vs_unmapped_reads:
         # 'python amplicon-smf/workflow/scripts/count_excluded_reads.py --retained {input.ot_bam} --removed {input.problematic_reads} --plot {output}'
         'python amplicon-smf/workflow/scripts/count_excluded_reads.py --stats {input} --plot {output}'
 
-# # need this to determine whether we should filter out the contigs like 0x-5x or do normal
-# def choose_contig_filtered_bam(wildcards):
-#     if samplesheet.loc[wildcards.sample, 'filter_contigs']:
-#         return 'results/{}/{}/tmp/{}.bwameth.contig_filtered.sam'.format(wildcards.experiment, wildcards.sample, wildcards.sample)
-#     else:
-#         return 'results/{}/{}/tmp/{}.bwameth.sam'.format(wildcards.experiment, wildcards.sample, wildcards.sample)
-
 rule sam_to_bam:
     input:
         # sam='results/{experiment}/{sample}/tmp/{sample}.bwameth.sam',
@@ -294,11 +172,6 @@ rule filter_uncoverted:
         "envs/python3_v7.yaml"
     shell:
         'python amplicon-smf/workflow/scripts/mark-nonconverted-reads-and-plot.py --reference {input.fa} --bam {input.bam} --out {output.bam} --plot {output.plot} --c_frac {params.cfrac}'
-
-# rule methylation_percentage:
-#     input:
-#     output:
-#     shell:
 
 rule run_methyldackel:
     input:
