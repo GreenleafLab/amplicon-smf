@@ -28,17 +28,58 @@ rule reverse_complement_fastq:
 def get_amplicon(wildcards):
     return samplesheet.loc[wildcards.sample, "amplicon_fa"]
 
+def revcomp_fasta_to_upper(lines, do_revcomp: bool):
+    """Reverse complement sequences in a FASTA (optionally) and uppercase them."""
+    def revcomp_upper(seq: str, do_rev: bool) -> str:
+        """
+        Uppercase the sequence and, if do_rev is True, return the reverse complement.
+        'N' stays 'N', non-ACGTN characters become 'N'.
+        """
+        comp_dict = {
+            "A": "T",
+            "C": "G",
+            "G": "C",
+            "T": "A",
+            "N": "N",
+        }
+        seq = seq.upper()
+        if not do_rev:
+            return seq
+        return "".join(comp_dict.get(b, "N") for b in reversed(seq))
+
+    header = None
+    seq_chunks = []
+    for line in lines:
+        line = line.rstrip("\n")
+        if line.startswith(">"):
+            # flush previous record
+            if header is not None:
+                seq = "".join(seq_chunks)
+                yield header
+                yield revcomp_upper(seq, do_revcomp)
+            header = line
+            seq_chunks = []
+        else:
+            seq_chunks.append(line)
+    # flush last
+    if header is not None:
+        seq = "".join(seq_chunks)
+        yield header
+        yield revcomp_upper(seq, do_revcomp)
+
 rule reverse_complement_fasta:
     input:
         get_amplicon
     output:
         'results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa'
     params:
-        rc_or_not=lambda wildcards: 'fastx_reverse_complement -i - -o' if samplesheet.loc[wildcards.sample,'bottom_strand'] else 'cat > '
+        do_revcomp=lambda wc: bool(samplesheet.loc[wc.sample, "bottom_strand"])
     conda:
         "envs/python3_v7.yaml"
-    shell:
-        "awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | {params.rc_or_not} {output}"
+    run:
+        with open(input[0]) as inp, open(output[0], "w") as out:
+            for line in revcomp_fasta_to_upper(inp, params.do_revcomp):
+                out.write(line + "\n")
 
 rule index_fasta:
     input:
