@@ -11,7 +11,7 @@
 The code here takes paired-end FASTQs from an amplicon SMF experiment and analyzes the single reads for methylation state. It returns both bulk measurements and single-molecule measurements, and the repo has additional code for downstream plotting. There are also scripts in `workflow/scripts` for calling binding (`classify_single_molecule_binding_v2.py`) and fitting the partition function model (`fit_partition_function_model_v3.py`).
 
 ## Requirements:
-Snakemake handles the conda environments (two separate ones, for python2 and 3, see there for a specific list of packages and versions). So to run this, all you need is an environment containing Snakemake (7.15.2) and mamba (0.27.0). Memory requirements are usually pretty minimal (especially for data from a Miseq). Typically I run these on an interactive job on Stanford's HPC cluster with ~16G of memory, and it typically runs overnight.
+Snakemake handles the conda environments (now a single py3 env, see there for a specific list of packages and versions). So to run this, all you need is an environment containing Snakemake (7.15.2) and mamba (0.27.0). Memory requirements are usually pretty minimal (especially for data from a Miseq). Typically I run these on an interactive job on Stanford's HPC cluster with ~16G of memory, and it typically runs overnight. I am "Vendoring" (ChatGPT told me this is an acceptable term) bwameth because I needed to change how it calls bwa (long story...) but anyway HUGE shoutout to brentp for a great piece of code: https://github.com/brentp/bwa-meth.
 
 ## Input Files
 
@@ -28,6 +28,7 @@ The samplesheet contains all of the sample-level information you need to run. An
 - include_cpg: Whether or not to include CpGs in the analysis [OPTIONAL; default FALSE]
 - no_endog_meth: Whether endogenous CpG methylation is expected to be prevalent or not (note that this is slightly different than the above, for instance, even if we didn’t include CpG MTase, there are some GpC sites that overlap CpG sites, and if we expect there to be a decent amount of endogenous methylation, we would have to ignore these) [OPTIONAL; default FALSE]
 - ignore_bounds: Whether or not to mandate that all reads start/end within one “perfect-primer length” of the amplicons in amplicon_fa. This was included because sometimes there is slippage during PCR/sequencing that leads to reads that map (perfectly) in the middle of a molecule. The reason to turn this off would be to avoid having to duplicate all the amplicons for both E and P PCR in ExP, for example [OPTIONAL; default FALSE]
+- deaminase: whether this is with deaminase enzyme (rather than MCviPI), which will now return results for all Cs not just GpCs or CpGs (note that the read-level conversion filtering is gone, obviously) (also note that the plots will be "backwards", still working on fixing this) [OPTIONAL: default FALSE]
 - read1_length: How long read1 (actually read2, since in pipeline read1 and read2 are swapped) was sequenced (note that I could have just gotten this from the FASTQs but I’m lazy, this will change) [OPTIONAL; default in config]
 - read2_length: How long read2 (actually read1, since in pipeline read1 and read2 are swapped) was sequenced (note that I could have just gotten this from the FASTQs but I’m lazy, this will change) [OPTIONAL; default in config]
 - bottom_strand: whether the strand captured by the SMF primers is the “bottom” strand (as it is for the TetO library) or not, tells this code which strand to search for conversion on [OPTIONAL; default TRUE]
@@ -40,6 +41,7 @@ The configfile contains experiment-level information, specifically:
 - read1_length: default read length for all samples (if you don’t want to specify for each)
 - read2_length: default read length for all samples (if you don’t want to specify for each)
 - unconverted_frac: fraction of non-GpC Cs that need to be converted for a read to count (0.85 seems to work well, except might be different transitioning into the genome)
+- threads: how many threads to use for alignment [OPTIONAL; default 1]
 
 Note: read1_length should actually be length of read2 from the sequencer since in the pipeline read1 and read2 are swapped. Similarly, read2_length should be the length of read1's from the sequencer.
 
