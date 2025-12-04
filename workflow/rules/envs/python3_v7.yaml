@@ -7,8 +7,6 @@ channels:
 dependencies:
   - biopython
   - bwa
-  - fastcluster
-  - htslib
   - matplotlib
   - methyldackel
   - numpy
