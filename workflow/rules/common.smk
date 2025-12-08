@@ -32,6 +32,8 @@ if 'bottom_strand' not in samplesheet.columns:
     samplesheet['bottom_strand'] = True
 if 'deaminase' not in samplesheet.columns:
     samplesheet['deaminase'] = False
+# if 'dedup' not in samplesheet.columns:
+#     samplesheet['dedup'] = False
 
 # validate(samples, schema="../schemas/samples.schema.yaml")
 

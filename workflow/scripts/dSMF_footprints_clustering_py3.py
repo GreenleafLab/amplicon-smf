@@ -5,6 +5,7 @@ script. Uses array masking logic for C contexts instead of dicts.
 
 Outputs:
   - <prefix>.<label>.full_unclustered.matrix
+  - <prefix>.<label>.allCdedup.full_unclustered.matrix
   - <prefix>.<label>.clustered.matrix (when -cluster is used)
   - QC summary to out_done_file
 """
@@ -453,8 +454,43 @@ def main():
 
             df = pd.DataFrame(rows)
 
+            # # Group and score per read ID
+            # scores_list: List[np.ndarray] = []
+            # allC_scores_list: List[np.ndarray] = []  # all-Cs for dedup
+            # cover_counts: List[int] = []
+            # ids: List[str] = []
+
+            # for qname, g in df.groupby("qname", sort=False):
+            #     segs = list(zip(g["rstart"].to_numpy(), g["seq"].to_numpy()))
+            #     rstart_m, seq_m, cov_m = merge_alignments(
+            #         segs,
+            #         region_start=start,
+            #         ref=ref,
+            #         prefer_ref_on_conflict=True,
+            #     )
+            #     if not seq_m:
+            #         continue
+
+            #     sc, cov = score_read_against_region(
+            #         rstart_m,
+            #         seq_m,
+            #         start,
+            #         args.c_type,
+            #         args.noEndogenousMethylation,
+            #         ref,
+            #     )
+            #     if sc is None:
+            #         continue
+            #     if (args.minCov is not None) and (cov.mean() < args.minCov):
+            #         continue
+
+            #     scores_list.append(sc)
+            #     cover_counts.append(int(cov.sum()))
+            #     ids.append(qname)
+
             # Group and score per read ID
-            scores_list: List[np.ndarray] = []
+            scores_ctx_list: List[np.ndarray] = []      # requested context (CG/GC/both/allC)
+            allC_scores_list: List[np.ndarray] = []     # all Cs for deduplication
             cover_counts: List[int] = []
             ids: List[str] = []
 
@@ -469,7 +505,8 @@ def main():
                 if not seq_m:
                     continue
 
-                sc, cov = score_read_against_region(
+                # First: score in the requested context (this is what we'll output)
+                sc_ctx, cov = score_read_against_region(
                     rstart_m,
                     seq_m,
                     start,
@@ -477,41 +514,81 @@ def main():
                     args.noEndogenousMethylation,
                     ref,
                 )
-                if sc is None:
+                if sc_ctx is None:
                     continue
                 if (args.minCov is not None) and (cov.mean() < args.minCov):
                     continue
 
-                scores_list.append(sc)
+                # Second: score all cytosines for deduplication
+                if args.c_type == "allC":
+                    # No need to recompute; same as sc_ctx
+                    sc_allC = sc_ctx
+                else:
+                    sc_allC, _ = score_read_against_region(
+                        rstart_m,
+                        seq_m,
+                        start,
+                        "allC",      # score every C
+                        False,       # no_endog irrelevant for allC
+                        ref,
+                    )
+
+                scores_ctx_list.append(sc_ctx)
+                allC_scores_list.append(sc_allC)
                 cover_counts.append(int(cov.sum()))
                 ids.append(qname)
 
-            if not scores_list:
+            if not scores_ctx_list:
                 print(f"No reads retained for: {label}")
                 continue
 
-            # 1) Generate scores matrix, dedup if requested, write stats + full matrix
-            scores_arr = np.vstack(scores_list).astype(int, copy=False)
-            total, uniq, kept_idx, scores_full = qc_dedup(scores_arr, do_dedup=args.dedup)
 
-            # Keep IDs and coverage in sync with full matrix (post-dedup)
-            ids_full = [ids[i] for i in kept_idx]
-            cov_full = [cover_counts[i] for i in kept_idx]
+            # # 1) Generate scores matrix, dedup if requested, write stats + full matrix
+            # scores_arr = np.vstack(scores_list).astype(int, copy=False)
+            # total, uniq, kept_idx, scores_full = qc_dedup(scores_arr, do_dedup=args.dedup)
+
+            # # Keep IDs and coverage in sync with full matrix (post-dedup)
+            # ids_full = [ids[i] for i in kept_idx]
+            # cov_full = [cover_counts[i] for i in kept_idx]
+
+            # reads_per_state = (total / uniq) if uniq > 0 else float("nan")
+            # out_qc.write(f"{label}\t{total}\t{uniq}\t{reads_per_state:.2f}\n")
+            # out_qc.flush()
+
+            # 1) Build matrices: requested context and all-Cs (for dedup)
+            scores_ctx_arr = np.vstack(scores_ctx_list).astype(int, copy=False)
+            allC_arr = np.vstack(allC_scores_list).astype(int, copy=False)
+
+            # Deduplicate patterns based on all-Cs matrix
+            total, uniq, kept_idx, allC_dedup = qc_dedup(allC_arr, do_dedup=True)
 
             reads_per_state = (total / uniq) if uniq > 0 else float("nan")
             out_qc.write(f"{label}\t{total}\t{uniq}\t{reads_per_state:.2f}\n")
             out_qc.flush()
 
-            full_path = f"{args.out_prefix}.{label}.full_unclustered.matrix"
-            write_matrix(full_path, chrom, start, end, scores_full, ids_full, strand)
-            print(f"Wrote full matrix: {full_path}")
+            # Keep IDs and coverage in sync with deduped matrix
+            ids_dedup = [ids[i] for i in kept_idx]
+            cov_dedup = [cover_counts[i] for i in kept_idx]
 
-            # 2) Subset + cluster if requested
-            if args.cluster and scores_full.shape[0] > 1:
+            # Context-specific deduped matrix (same columns as requested context)
+            scores_ctx_dedup = scores_ctx_arr[kept_idx]
+
+            # 2) Write non-dedup (all reads) matrix for requested context
+            full_path = f"{args.out_prefix}.{label}.full_unclustered.matrix"
+            write_matrix(full_path, chrom, start, end, scores_ctx_arr, ids, strand)
+            print(f"Wrote full matrix (all reads): {full_path}")
+
+            # 3) Write deduped-on-allCs matrix (still in requested context)
+            dedup_path = f"{args.out_prefix}.{label}.allCdedup.full_unclustered.matrix"
+            write_matrix(dedup_path, chrom, start, end, scores_ctx_dedup, ids_dedup, strand)
+            print(f"Wrote allC-deduped matrix: {dedup_path}")
+
+            # 4) Subset + cluster on the deduped matrix if requested
+            if args.cluster and scores_ctx_dedup.shape[0] > 1:
                 clust_scores, labels, ids_clust = subset_and_cluster(
-                    scores_full,
-                    ids_full,
-                    cov_full,
+                    scores_ctx_dedup,
+                    ids_dedup,
+                    cov_dedup,
                     args.subset,
                     n_clusters=4,
                 )
@@ -523,12 +600,71 @@ def main():
                     mat = clust_scores[:, ::-1] if strand == "-" else clust_scores
                     for lab, row in zip(labels, mat):
                         fh.write(f"{lab}\t" + "\t".join(map(str, row.tolist())) + "\n")
-                print(f"Wrote clustered matrix: {clust_path}")
+                print(f"Wrote clustered matrix (allC-deduped input): {clust_path}")
 
-                # 3) Heatmap on clustered matrix if requested
+                # 5) Heatmap on clustered matrix if requested
                 if args.heatmap:
                     out_png = f"{args.out_prefix}.{label}.matrix.png"
                     make_heatmap(clust_scores, out_png)
+
+
+            # # 1) Generate scores matrix, dedup if requested, write stats + full matrix
+            # scores_arr = np.vstack(scores_list).astype(int, copy=False)
+
+            # if args.dedup:
+            #     # Use all-Cs matrix to determine unique patterns & which rows to keep
+            #     if args.c_type == "allC":
+            #         allC_arr = scores_arr
+            #     else:
+            #         allC_arr = np.vstack(allC_scores_list).astype(int, copy=False)
+
+            #     # Dedup on all-Cs patterns; discard duplicate indices
+            #     total, uniq, kept_idx, _ = qc_dedup(allC_arr, do_dedup=True)
+
+            #     # Apply the dedup indices to the requested-context matrix
+            #     scores_full = scores_arr[kept_idx]
+            # else:
+            #     # Legacy behavior: no dedup, but still compute uniq for QC
+            #     total, uniq, kept_idx, scores_full = qc_dedup(
+            #         scores_arr,
+            #         do_dedup=False,
+            #     )
+
+            # # Keep IDs and coverage in sync with the final matrix
+            # ids_full = [ids[i] for i in kept_idx]
+            # cov_full = [cover_counts[i] for i in kept_idx]
+
+            # reads_per_state = (total / uniq) if uniq > 0 else float("nan")
+            # out_qc.write(f"{label}\t{total}\t{uniq}\t{reads_per_state:.2f}\n")
+            # out_qc.flush()
+
+            # full_path = f"{args.out_prefix}.{label}.full_unclustered.matrix"
+            # write_matrix(full_path, chrom, start, end, scores_full, ids_full, strand)
+            # print(f"Wrote full matrix: {full_path}")
+
+            # # 2) Subset + cluster if requested
+            # if args.cluster and scores_full.shape[0] > 1:
+            #     clust_scores, labels, ids_clust = subset_and_cluster(
+            #         scores_full,
+            #         ids_full,
+            #         cov_full,
+            #         args.subset,
+            #         n_clusters=4,
+            #     )
+
+            #     clust_path = f"{args.out_prefix}.{label}.clustered.matrix"
+            #     header = "#" + chrom + "".join(f"\t{i}" for i in range(start, end))
+            #     with open(clust_path, "w") as fh:
+            #         fh.write(header + "\n")
+            #         mat = clust_scores[:, ::-1] if strand == "-" else clust_scores
+            #         for lab, row in zip(labels, mat):
+            #             fh.write(f"{lab}\t" + "\t".join(map(str, row.tolist())) + "\n")
+            #     print(f"Wrote clustered matrix: {clust_path}")
+
+            #     # 3) Heatmap on clustered matrix if requested
+            #     if args.heatmap:
+            #         out_png = f"{args.out_prefix}.{label}.matrix.png"
+            #         make_heatmap(clust_scores, out_png)
 
     bam.close()
     fa.close()

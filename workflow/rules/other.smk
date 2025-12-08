@@ -350,11 +350,12 @@ rule join_reads_and_first_cluster:
         matdir='results/{experiment}/{sample}/matrices',
         subset=1000,
         ctype=get_c_type,
-        no_endog_meth=lambda wildcards: '-noEndogenousMethylation' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else ''
+        no_endog_meth=lambda wildcards: '-noEndogenousMethylation' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else ''#,
+        # dedup=lambda wildcards: '-dedup' if samplesheet.loc[wildcards.sample, 'dedup'] else ''
     conda:
         "envs/python3_v6.yaml"
     shell:
-        'mkdir -p {params.matdir}; python amplicon-smf/workflow/scripts/dSMF_footprints_clustering_py3.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap'
+        'mkdir -p {params.matdir}; python amplicon-smf/workflow/scripts/dSMF_footprints_clustering_py3.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap'# {params.dedup}'
 
 rule plot_bulk_methylation2:
     input:
