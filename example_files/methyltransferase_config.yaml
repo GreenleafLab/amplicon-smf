@@ -1,7 +1,8 @@
 # This file should contain everything to configure the workflow on a global scale.
 # In case of sample based data, it should be complemented by a samples.tsv file that contains
 # one row per sample. It can be parsed easily via pandas.
-samples: "amplicon-smf/example_files/example_samplesheet.txt"
+
+samples: "example_files/methyltransferase_samplesheet.tsv"
 alignment_score_fraction: 0.8
 alignment_length_fraction: 0.8
 read1_length: 235
