@@ -19,7 +19,7 @@ jobs:
       - name: Set up Conda (Mambaforge)
         uses: conda-incubator/setup-miniconda@v3
         with:
-          miniforge-variant: Mambaforge
+          miniforge-variant: Miniforge3
           python-version: "3.12"
           auto-update-conda: false
           activate-environment: smf_snakemake
