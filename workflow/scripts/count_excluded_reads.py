@@ -51,7 +51,7 @@ def count_reads():
 
     fig, ax = plt.subplots()
     # ax.bar(['Retained', 'Filtered'], [retained_reads, removed_reads])
-    ax.bar(['Total', 'Retailed'], [retained_reads+removed_reads, retained_reads])
+    ax.bar(['Total', 'Retained'], [retained_reads+removed_reads, retained_reads])
     ax.set_ylabel('Reads')    
 
     plt.tight_layout()

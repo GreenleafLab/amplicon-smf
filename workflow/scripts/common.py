@@ -190,7 +190,7 @@ def get_methyl_positions(mat):
 
     return mat.loc[:,mat.mean()>=0].columns.tolist()
 
-def load_single_molecule_matrix(path, name=None, every_other=True):
+def load_single_molecule_matrix(path, name=None, every_other=False):
     '''
     Reads a single-molecule matrix from file, extracts the meaningful columns (using the function above) and returns
     Optionally (default) drops the duplicated columns (idk why but Georgi's script has 2 columns per GpC, one per C I guess?)

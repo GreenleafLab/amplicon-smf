@@ -23,8 +23,6 @@ bwa-meth supports indexes from BWA-MEM and BWA-MEM2.
     bwameth.py index $REF #For BWA-MEM (default)
     OR
     bwameth.py index-mem2 $REF #For BWA-MEM2
-
-NOTE: BD PULLED THIS FROM GITHUB 251203 -- THIS VERSION HAS THE -A EDIT!
 """
 from __future__ import print_function
 import tempfile
@@ -48,7 +46,7 @@ except ImportError: # python3
 import toolshed
 from toolshed import nopen, reader, is_newer_b
 
-__version__ = "0.2.9"
+__version__ = "0.2.2"
 
 def nopen_keep_parent_stdin(f, mode="r"):
 
@@ -316,7 +314,7 @@ class Bam(object):
     def ga_ct(self):
         return [x for x in self.other if x.startswith("YC:Z:")]
 
-    def longest_match(self, patt=re.compile(r"\d+M")):
+    def longest_match(self, patt=re.compile("\d+M")):
         return max(int(x[:-1]) for x in patt.findall(self.cigar))
 
 
@@ -334,36 +332,21 @@ def rname(fq1, fq2=""):
 
 
 def bwa_mem(fa, fq_convert_cmd, extra_args, threads=1, rg=None,
-            paired=True, set_as_failed=None, do_not_penalize_chimeras=False, skip_time_checks=False):
+            paired=True, set_as_failed=None, do_not_penalize_chimeras=False):
     conv_fa = convert_fasta(fa, just_name=True)
 
-    if skip_time_checks:
-        # Skip timestamp checks but still detect index type
-        if os.path.exists(conv_fa + '.amb') and os.path.exists(conv_fa + '.sa'):
-            idx = "mem1"
-            sys.stderr.write("--------------------\n")
-            sys.stderr.write("Found BWA MEM index\n")
-
-        elif os.path.exists(conv_fa + '.amb') and os.path.exists(conv_fa + '.pac'):
-            idx = "mem2"
-            sys.stderr.write("---------------------\n")
-            sys.stderr.write("Found BWA MEM2 index\n")
-
-        else:
-            raise BWAMethException("first run bwameth.py index %s OR bwameth.py index-mem2 %s" % (fa, fa))
+    if is_newer_b(conv_fa, (conv_fa + '.amb', conv_fa + '.sa')):
+        idx = "mem1"
+        sys.stderr.write("--------------------\n")
+        sys.stderr.write("Found BWA MEM index\n")
+        
+    elif is_newer_b(conv_fa, (conv_fa + '.amb', conv_fa + '.pac')):
+        idx = "mem2"
+        sys.stderr.write("---------------------\n")
+        sys.stderr.write("Found BWA MEM2 index\n")
+        
     else:
-        if is_newer_b(conv_fa, (conv_fa + '.amb', conv_fa + '.sa')):
-            idx = "mem1"
-            sys.stderr.write("--------------------\n")
-            sys.stderr.write("Found BWA MEM index\n")
-
-        elif is_newer_b(conv_fa, (conv_fa + '.amb', conv_fa + '.pac')):
-            idx = "mem2"
-            sys.stderr.write("---------------------\n")
-            sys.stderr.write("Found BWA MEM2 index\n")
-
-        else:
-            raise BWAMethException("first run bwameth.py index %s OR bwameth.py index-mem2 %s OR make sure the modification time on the generated c2t files is newer than on the .fa file" % (fa, fa))
+        raise BWAMethException("first run bwameth.py index %s OR bwameth.py index-mem2 %s" % (fa, fa))
 
 
     if not rg is None and not rg.startswith('@RG'):
@@ -376,11 +359,11 @@ def bwa_mem(fa, fq_convert_cmd, extra_args, threads=1, rg=None,
     if idx == "mem2":
         cmd += "|bwa-mem2 mem -T 40 -B 2 -L 10 -CM "
     else:
-        cmd += "|bwa mem -T 40 -B 2 -L 10 -CM -a " # note ben changed this to be for the "all alignments" version
+        cmd += "|bwa mem -T 40 -B 2 -L 10 -CM -a "
 
     if paired:
         cmd += ("-U 100 -p ")
-    cmd += "-R '{rg}' -t {threads} {extra_args} {conv_fa} /dev/stdin"
+    cmd += "-R '{rg}' -t {threads} {extra_args} {conv_fa} -"
     cmd = cmd.format(**locals())
     sys.stderr.write("running: %s\n" % cmd.lstrip("|"))
     sys.stderr.write("--------------------\n")
@@ -414,7 +397,7 @@ def handle_header(line, out=sys.stdout):
     if toks[0].startswith("@SQ"):
         sq, sn, ln = toks  # @SQ    SN:fchr11    LN:122082543
         # we have f and r, only print out f
-        chrom = sn.split(":", 1)[1]
+        chrom = sn.split(":")[1]
         if chrom.startswith('r'): return
         chrom = chrom[1:]
         toks = ["%s\tSN:%s\t%s" % (sq, chrom, ln)]
@@ -434,15 +417,13 @@ def handle_reads(alns, set_as_failed, do_not_penalize_chimeras):
         # don't need this any more.
         aln.other = [x for x in aln.other if not x.startswith('YS:Z')]
 
-        if not aln.is_mapped():
-            aln.seq = orig_seq
-            if len(aln.chrom) > 1 and aln.chrom[0] in 'fr':
-                aln.chrom = aln.chrom[1:]
-            continue
-
         # first letter of chrom is 'f' or 'r'
         direction = aln.chrom[0]
         aln.chrom = aln.chrom[1:]
+
+        if not aln.is_mapped():
+            aln.seq = orig_seq
+            continue
 
         assert direction in 'fr', (direction, aln)
         aln.other.append('YD:Z:' + direction)
@@ -557,10 +538,8 @@ def main(args=sys.argv[1:]):
             "multiple sets separated by commas, e.g. ... a_R1.fastq,b_R1.fastq"
             " a_R2.fastq,b_R2.fastq note that the order must be maintained.")
 
-    # need to escape '%' in help text to avoid problems with --help,
-    # see https://github.com/brentp/bwa-meth/issues/85
     p.add_argument('--do-not-penalize-chimeras', action='store_true', help="do not use the heuristic" 
-            " that if the longest match is not 44%% of the sequence length, we mark"
+            " that if the longest match is not 44% of the sequence length, we mark"
             " it as failed QC and un-pair it, and set all members of pair to unmapped")
 
     args, pass_through_args = p.parse_known_args(args)
@@ -568,15 +547,12 @@ def main(args=sys.argv[1:]):
     # for the 2nd file. use G => A and bwa's support for streaming.
     conv_fqs_cmd = convert_fqs(args.fastqs)
 
-    skip_time_checks = bool(os.environ.get("BWA_METH_SKIP_TIME_CHECKS", False))
-
     bwa_mem(args.reference, conv_fqs_cmd, ' '.join(map(str, pass_through_args)),
             threads=args.threads,
             rg=args.read_group or rname(*args.fastqs),
             paired=(len(args.fastqs) == 2 or args.interleaved),
             set_as_failed=args.set_as_failed,
-            do_not_penalize_chimeras=args.do_not_penalize_chimeras,
-            skip_time_checks=skip_time_checks)
+            do_not_penalize_chimeras=args.do_not_penalize_chimeras)
     
 
 if __name__ == "__main__":
