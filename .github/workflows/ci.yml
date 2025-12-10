@@ -27,7 +27,7 @@ jobs:
 
       - name: Install Snakemake + basic deps
         run: |
-          mamba install -y -c conda-forge -c bioconda "snakemake>=7,<8" pandas
+          mamba install -y -c conda-forge -c bioconda "snakemake>=9" pandas
 
       - name: Show conda envs
         run: conda info --envs
