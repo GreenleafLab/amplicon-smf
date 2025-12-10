@@ -24,7 +24,7 @@ bwa-meth supports indexes from BWA-MEM and BWA-MEM2.
     OR
     bwameth.py index-mem2 $REF #For BWA-MEM2
 
-NOTE: BD PULLED THIS FROM GITHUB 251203 -- THIS VERSION HAS NO EDITS!
+NOTE: BD PULLED THIS FROM GITHUB 251203 -- THIS VERSION HAS THE -A EDIT!
 """
 from __future__ import print_function
 import tempfile
@@ -376,7 +376,7 @@ def bwa_mem(fa, fq_convert_cmd, extra_args, threads=1, rg=None,
     if idx == "mem2":
         cmd += "|bwa-mem2 mem -T 40 -B 2 -L 10 -CM "
     else:
-        cmd += "|bwa mem -T 40 -B 2 -L 10 -CM "
+        cmd += "|bwa mem -T 40 -B 2 -L 10 -CM -a " # note ben changed this to be for the "all alignments" version
 
     if paired:
         cmd += ("-U 100 -p ")

@@ -1,8 +1,121 @@
-# Run tests with `snakemake --cores 1 --use-conda tests` in the tests directory
+"""
+Snakemake tests for key functions and smoke tests
+on small methyltransferase and deaminase data. 
 
-rule tests:
-    message: "Running unit tests..."
-    conda: "../workflow/rules/envs/smf_py3_v7.yaml"
+In the tests directory:
+- run unit tests with 
+  `snakemake unit_tests -c 1 --use-conda`
+- run pipeline tests with 
+  `snakemake test_methyltransferase_pipeline -c 1 --forceall`
+  `snakemake test_deaminase_pipeline -c 1 --forceall`
+
+Previous pipeline test results will be deleted if any test is run!
+"""
+import os
+import pandas as pd
+from snakemake.common.configfile import load_configfile
+
+# Figure out paths to some folders
+TESTS_DIR = workflow.basedir
+REPO_ROOT = os.path.abspath(os.path.join(TESTS_DIR, ".."))
+EXAMPLES_DIR = os.path.join(REPO_ROOT, "example_files")
+WORKFLOW_DIR = os.path.join(REPO_ROOT, "workflow")
+RESULTS_DIR = os.path.join(REPO_ROOT, "results")
+
+# For both methylation and deamination, figure out where output files will
+# be and pick a file to check if the pipeline ran all the way through
+METH_CONFIG = os.path.join(EXAMPLES_DIR, "methyltransferase_config.yaml")
+_meth_cfg   = load_configfile(METH_CONFIG)
+_meth_samplesheet = _meth_cfg["samples"]
+if not os.path.isabs(_meth_samplesheet):
+    _meth_samplesheet = os.path.join(REPO_ROOT, _meth_samplesheet)
+_meth_df = pd.read_csv(_meth_samplesheet, sep="\t")
+_meth_experiments = sorted(_meth_df["experiment"].unique())
+if len(_meth_experiments) != 1:
+    raise ValueError(f"Expected exactly one experiment in methyl samplesheet, got {_meth_experiments}")
+METH_SAMPLE = _meth_df.loc[0, "sample_name"]
+METH_EXPERIMENT = _meth_experiments[0]
+METH_TEST_OUTPUT = os.path.join(RESULTS_DIR,
+                                METH_EXPERIMENT,
+                                METH_SAMPLE,
+                                "stats",
+                                "methyltransferase.nuc_len_qc.stats.txt")
+
+DEAM_CONFIG = os.path.join(EXAMPLES_DIR, "deaminase_config.yaml")
+_deam_cfg   = load_configfile(DEAM_CONFIG)
+_deam_samplesheet = _deam_cfg["samples"]
+if not os.path.isabs(_deam_samplesheet):
+    _deam_samplesheet = os.path.join(REPO_ROOT, _deam_samplesheet)
+_deam_df = pd.read_csv(_deam_samplesheet, sep="\t")
+_deam_experiments = sorted(_deam_df["experiment"].unique())
+if len(_deam_experiments) != 1:
+    raise ValueError(f"Expected exactly one experiment in deamination samplesheet, got {_deam_experiments}")
+DEAM_SAMPLE = _deam_df.loc[0, "sample_name"]
+DEAM_EXPERIMENT = _deam_experiments[0]
+DEAM_TEST_OUTPUT = os.path.join(RESULTS_DIR,
+                                DEAM_EXPERIMENT,
+                                DEAM_SAMPLE,
+                                "stats",
+                                f"{DEAM_SAMPLE}.nuc_len_qc.stats.txt")
+
+
+rule test_methyltransferase_pipeline:
+    message:
+        "Running methyltransferase pipeline with test data..."
+    output:
+        stats = METH_TEST_OUTPUT
+    params:
+        repo_root = REPO_ROOT,
+        config_file = METH_CONFIG,
+    threads:
+        workflow.cores
+    run:
+        # Run pipeline
+        shell(r"""
+            cd {params.repo_root}
+            snakemake \
+              -s workflow/Snakefile \
+              -w 15 \
+              --configfile {params.config_file} \
+              --cores {threads} \
+              --use-conda \
+              --forceall
+        """)
+        # Check that output exists
+        assert os.path.exists(output.stats), f"Missing stats file: {output.stats}"
+        # TODO: put file content checks here
+
+rule test_deaminase_pipeline:
+    message:
+        "Running deaminase pipeline with test data..."
+    output:
+        stats = DEAM_TEST_OUTPUT
+    params:
+        repo_root = REPO_ROOT,
+        config_file = DEAM_CONFIG,
+    threads:
+        workflow.cores
+    run:
+        # Run pipeline
+        shell(r"""
+            cd {params.repo_root}
+            snakemake \
+              -s workflow/Snakefile \
+              -w 15 \
+              --configfile {params.config_file} \
+              --cores {threads} \
+              --use-conda \
+              --forceall
+        """)
+        # Check that output exists
+        assert os.path.exists(output.stats), f"Missing stats file: {output.stats}"
+        # TODO: put file content checks here
+
+rule unit_tests:
+    message: 
+        "Running unit tests..."
+    conda:
+        os.path.join(REPO_ROOT, "workflow", "rules", "envs", "python3_v7.yaml")
     shell:
         r"""
         PYTHONPATH=../workflow/scripts \

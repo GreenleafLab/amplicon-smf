@@ -1,2 +1,0 @@
-sample_name	fastq_R1	fastq_R2	amplicon_fa	experiment	filter_contigs	include_cpg	ignore_bounds
-example_sample	amplicon-smf/example_files/example_fastq_R1_001.fastq.gz	amplicon-smf/example_files/example_fastq_R2_001.fastq.gz	amplicon-smf/example_files/opJS45.amplicon.fa	example	TRUE	FALSE	FALSE
