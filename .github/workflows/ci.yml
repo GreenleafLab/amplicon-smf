@@ -24,6 +24,9 @@ jobs:
           auto-update-conda: false
           activate-environment: smf_snakemake
           use-mamba: true
+      - name: Configure conda with strict channel priority
+        run: |
+          conda config --set channel_priority strict
 
       - name: Install Snakemake + basic deps
         run: |
