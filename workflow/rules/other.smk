@@ -319,7 +319,8 @@ rule join_reads_and_first_cluster:
         subset=1000,
         ctype=get_c_type,
         no_endog_meth=lambda wildcards: '-noEndogenousMethylation' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else '',
-        dedup_on=lambda wildcards: samplesheet.loc[wildcards.sample, 'dedup_on']
+        dedup_on=lambda wildcards: samplesheet.loc[wildcards.sample, 'dedup_on'],
+        script = os.path.join(SCRIPTS_DIR, "dSMF_footprints_clustering_py3.py")
     conda:
         os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
