@@ -314,16 +314,16 @@ rule join_reads_and_first_cluster:
     output:
         'results/{experiment}/{sample}/{sample}.amplicon_stats.txt'
     params:
-        prefix = 'results/{experiment}/{sample}/matrices/{sample}',
-        matdir = 'results/{experiment}/{sample}/matrices',
-        subset = 1000,
-        ctype = get_c_type,
-        no_endog_meth = lambda wildcards: '-noEndogenousMethylation' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else '',
-        script = os.path.join(SCRIPTS_DIR, "dSMF_footprints_clustering_py3.py")
+        prefix='results/{experiment}/{sample}/matrices/{sample}',
+        matdir='results/{experiment}/{sample}/matrices',
+        subset=1000,
+        ctype=get_c_type,
+        no_endog_meth=lambda wildcards: '-noEndogenousMethylation' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else '',
+        dedup_on=lambda wildcards: samplesheet.loc[wildcards.sample, 'dedup_on']
     conda:
         os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
-        'mkdir -p {params.matdir}; python {params.script} {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap'
+        'mkdir -p {params.matdir}; python {params.script} {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap --dedup_on {params.dedup_on}'
 
 rule plot_bulk_methylation2:
     input:
