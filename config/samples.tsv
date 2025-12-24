@@ -1,2 +1,0 @@
-sample_name	fastq_R1	fastq_R2	amplicon_fa	experiment
-tfbs-b1-smf_S12	/oak/stanford/groups/wjg/seqruns/210108_M00653_0093_000000000-G6RRK/Data/Intensities/BaseCalls/tfbs-b1-smf_S12_L001_R1_001.fastq.gz	/oak/stanford/groups/wjg/seqruns/210108_M00653_0093_000000000-G6RRK/Data/Intensities/BaseCalls/tfbs-b1-smf_S12_L001_R2_001.fastq.gz	/oak/stanford/groups/wjg/bgrd/projects/smf/210817_smf_code_rewrite_reanalysis/amplicon_info/tfbs.amplicon.fa	tfbs_smf

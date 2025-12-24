@@ -1,0 +1,3 @@
+sample_name	fastq_R1	fastq_R2	amplicon_fa	experiment	filter_contigs	no_endog_meth	ignore_bounds	deaminase
+deaminase1	example_files/deaminase1_S1_R1_001.fastq.gz	example_files/deaminase1_S1_R2_001.fastq.gz	example_files/opJS45.amplicon.fa	deaminase_test	FALSE	TRUE	FALSE	TRUE
+deaminase2	example_files/deaminase2_S2_R1_001.fastq.gz	example_files/deaminase2_S2_R2_001.fastq.gz	example_files/opJS45.amplicon.fa	deaminase_test	FALSE	TRUE	FALSE	TRUE

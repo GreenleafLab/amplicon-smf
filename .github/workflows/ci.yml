@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash -l {0}   # so conda init works
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Conda (Mambaforge)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-variant: Miniforge3
+          python-version: "3.12"
+          auto-update-conda: false
+          activate-environment: smf_snakemake
+          use-mamba: true
+      - name: Configure conda with strict channel priority
+        run: |
+          conda config --set channel_priority strict
+
+      - name: Install Snakemake + basic deps
+        run: |
+          mamba install -y -c conda-forge -c bioconda "snakemake>=9" pandas
+
+      - name: Show conda envs
+        run: conda info --envs
+
+      - name: Run unit tests via Snakemake
+        working-directory: tests
+        run: |
+          snakemake unit_tests \
+            --cores 1 \
+            --use-conda
+
+      - name: Run methyltransferase pipeline test
+        working-directory: tests
+        run: |
+          snakemake test_methyltransferase_pipeline \
+            --cores 2 \
+            --use-conda
+
+      - name: Run deaminase pipeline test
+        working-directory: tests
+        run: |
+          snakemake test_deaminase_pipeline \
+            --cores 2 \
+            --use-conda

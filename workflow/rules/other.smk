@@ -1,34 +1,23 @@
+import os
+
+# Figure out where some folders are relative to this Snakefile
+WORKFLOW_DIR = workflow.basedir
+SCRIPTS_DIR = os.path.join(WORKFLOW_DIR, "scripts")
+ENV_DIR = os.path.join(WORKFLOW_DIR, "rules", "envs")
+
 rule fastqc:
     input:
         lambda wildcards: samplesheet[['fastq_R1','fastq_R2']].to_numpy().flatten().tolist()
     output:
         'results/qc/fastqc/fastqc.txt'
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     params:
-        outdir='results/qc/fastqc'
+        outdir = 'results/qc/fastqc'
     shell:
         'fastqc -o {params.outdir} -f fastq {input}; touch {output}'
 
-# rule fastqc:
-#     input:
-#         ''
-#     output:
-#         'results/qc/fastqc/{read}_fastqc.html'
-#     conda:
-#         "envs/python3_v6.yaml"
-#     params:
-#         outdir='results/qc/fastqc'
-#     shell:
-#         'fastqc -o {params.outdir} -f fastq {input}; touch {output}'
-
 def get_fastq(wildcards):
-    # bottom_strand = samplesheet.loc[wildcards.sample,'bottom_strand']
-    # if bottom_strand:
-    #     fastq_col = 'fastq_R{}'.format(3-int(wildcards.read))
-    # else:
-    #     fastq_col = 'fastq_R{}'.format(wildcards.read)
-    # fastq_col = 'fastq_R{}'.format(wildcards.read)
     fastq_col = 'fastq_R{}'.format(3-int(wildcards.read))
     fastq = samplesheet.loc[wildcards.sample, fastq_col]
     return fastq
@@ -39,12 +28,51 @@ rule reverse_complement_fastq:
     output:
         temp('results/{experiment}/{sample}/tmp/{sample}_revcomp_R{read}_001.fastq.gz')
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
         'cp {input.fq} {output}'
 
 def get_amplicon(wildcards):
     return samplesheet.loc[wildcards.sample, "amplicon_fa"]
+
+def revcomp_fasta_to_upper(lines, do_revcomp: bool):
+    """Reverse complement sequences in a FASTA (optionally) and uppercase them."""
+    def revcomp_upper(seq: str, do_rev: bool) -> str:
+        """
+        Uppercase the sequence and, if do_rev is True, return the reverse complement.
+        'N' stays 'N', non-ACGTN characters become 'N'.
+        """
+        comp_dict = {
+            "A": "T",
+            "C": "G",
+            "G": "C",
+            "T": "A",
+            "N": "N",
+        }
+        seq = seq.upper()
+        if not do_rev:
+            return seq
+        return "".join(comp_dict.get(b, "N") for b in reversed(seq))
+
+    header = None
+    seq_chunks = []
+    for line in lines:
+        line = line.rstrip("\n")
+        if line.startswith(">"):
+            # flush previous record
+            if header is not None:
+                seq = "".join(seq_chunks)
+                yield header
+                yield revcomp_upper(seq, do_revcomp)
+            header = line
+            seq_chunks = []
+        else:
+            seq_chunks.append(line)
+    # flush last
+    if header is not None:
+        seq = "".join(seq_chunks)
+        yield header
+        yield revcomp_upper(seq, do_revcomp)
 
 rule reverse_complement_fasta:
     input:
@@ -52,80 +80,13 @@ rule reverse_complement_fasta:
     output:
         'results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa'
     params:
-        rc_or_not=lambda wildcards: 'fastx_reverse_complement -i - -o' if samplesheet.loc[wildcards.sample,'bottom_strand'] else 'cat > '
+        do_revcomp = lambda wc: bool(samplesheet.loc[wc.sample, "bottom_strand"])
     conda:
-        "envs/python3_v6.yaml"
-    shell:
-        # "ml fastx_toolkit/0.0.14; awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | fastx_reverse_complement -i - -o {output}"
-        # "ml fastx_toolkit/0.0.14; awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | {params.rc_or_not} {output}"
-        "awk '/^>/ {{print($0)}}; /^[^>]/ {{print(toupper($0))}}' {input} | {params.rc_or_not} {output}"
-
-# rule reverse_complement_fasta:
-#     input:
-#         get_amplicon
-#     output:
-#         "results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa"
-#     params:
-#         # 1 = reverse-complement, 0 = just uppercase
-#         rc_flag=lambda wildcards: 1 if samplesheet.loc[wildcards.sample, "bottom_strand"] else 0
-#     conda:
-#         "envs/python3_v6.yaml"
-#     shell:
-#         r"""
-#         awk -v rc={params.rc_flag} '
-#             BEGIN {{
-#                 comp["A"]="T"; comp["T"]="A"; comp["G"]="C"; comp["C"]="G";
-#                 comp["a"]="T"; comp["t"]="A"; comp["g"]="C"; comp["c"]="G";
-#                 comp["N"]="N"; comp["n"]="N";
-#             }}
-#             /^>/ {{
-#                 # If we already collected a previous record, flush it
-#                 if (NR > 1) {{
-#                     if (rc == 1) {{
-#                         # reverse complement, uppercase
-#                         n = length(seq);
-#                         rev = "";
-#                         for (i = n; i >= 1; i--) {{
-#                             b = toupper(substr(seq, i, 1));
-#                             if (b in comp) rev = rev comp[b];
-#                             else rev = rev "N";
-#                         }}
-#                         print header;
-#                         print rev;
-#                     }} else {{
-#                         # just uppercase
-#                         print header;
-#                         print toupper(seq);
-#                     }}
-#                 }}
-#                 header = $0;
-#                 seq = "";
-#                 next;
-#             }}
-#             /^[^>]/ {{
-#                 seq = seq $0;
-#                 next;
-#             }}
-#             END {{
-#                 if (header != "") {{
-#                     if (rc == 1) {{
-#                         n = length(seq);
-#                         rev = "";
-#                         for (i = n; i >= 1; i--) {{
-#                             b = toupper(substr(seq, i, 1));
-#                             if (b in comp) rev = rev comp[b];
-#                             else rev = rev "N";
-#                         }}
-#                         print header;
-#                         print rev;
-#                     }} else {{
-#                         print header;
-#                         print toupper(seq);
-#                     }}
-#                 }}
-#             }}
-#         ' {input} > {output}
-#         """
+        os.path.join(ENV_DIR, "python3_v7.yaml")
+    run:
+        with open(input[0]) as inp, open(output[0], "w") as out:
+            for line in revcomp_fasta_to_upper(inp, params.do_revcomp):
+                out.write(line + "\n")
 
 rule index_fasta:
     input:
@@ -137,9 +98,11 @@ rule index_fasta:
         'results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa.bwameth.c2t.amb', 
         'results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa.bwameth.c2t.sa' 
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
+    params:
+        script = os.path.join(SCRIPTS_DIR, "bwameth.py")
     shell:
-        'amplicon-smf/workflow/scripts/bwameth.py index {input.fa}'
+        '{params.script} index {input.fa}'
 
 rule align_bwameth:
     input:
@@ -155,11 +118,14 @@ rule align_bwameth:
     log:
         'results/{experiment}/{sample}/tmp/{sample}.bwameth.log'
     params:
-        threads=config.get('threads', 1) # 1
+        threads = config.get('threads', 1),     # 1 default
+        script = os.path.join(SCRIPTS_DIR, "bwameth.py")
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
-        'amplicon-smf/workflow/scripts/bwameth.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam} 2> {log} || (echo "align_bwameth failed; stderr follows:" >&2 ; cat {log} >&2 ; exit 1)'
+        '{params.script} --threads {params.threads} --reference {input.amplicon} '
+        '{input.read1} {input.read2} > {output.sam} 2> {log} '
+        '|| (echo "align_bwameth failed; stderr follows:" >&2 ; cat {log} >&2 ; exit 1)'
 
 rule align_bwameth_all:
     input:
@@ -174,11 +140,13 @@ rule align_bwameth_all:
     log:
         'results/{experiment}/{sample}/tmp/{sample}.bwameth.log'
     params:
-        threads=config.get('threads', 1)
+        threads = config.get('threads', 1),
+        script = os.path.join(SCRIPTS_DIR, "bwameth_all_alignments.py")
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
-        'amplicon-smf/workflow/scripts/bwameth_all_alignments.py --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam} 2> {log} || (echo "align_bwameth failed; stderr follows:" >&2 ; cat {log} >&2 ; exit 1)'
+        'python {params.script} --threads {params.threads} --reference {input.amplicon} {input.read1} {input.read2} > {output.sam} 2> {log} || (echo "align_bwameth failed; stderr follows:" >&2 ; cat {log} >&2 ; exit 1)'
+
 
 # rule filter_sam_file:
 #     input: 
@@ -211,15 +179,16 @@ rule correct_mismatched_amplicons:
         problematic_reads=temp('results/{experiment}/{sample}/tmp/{sample}.bwameth.problematic_reads.sam')
         # problematic_reads='results/{experiment}/{sample}/tmp/{sample}.bwameth.problematic_reads.sam'
     params:
-        read1_thresh=lambda wildcards: int(samplesheet.loc[wildcards.sample,'read1_length'] * config['alignment_length_fraction']), #  config['read1_length_override'].get(wildcards.sample, config['read1_length_threshold']) if 'read1_length_override' in config.keys() else config['read1_length_threshold'],
-        read2_thresh=lambda wildcards: int(samplesheet.loc[wildcards.sample,'read2_length'] * config['alignment_length_fraction']), # config['read2_length_override'].get(wildcards.sample, config['read2_length_threshold']) if 'read2_length_override' in config.keys() else config['read2_length_threshold'],
-        as_thresh=config['alignment_score_fraction'],
-        ignore_bounds=lambda wildcards: '--ignore_bounds' if samplesheet.loc[wildcards.sample,'ignore_bounds'] else '', # wildcards.sample in config['ignore_bounds'] else ''
-        write_problematic_reads=lambda wildcards: '--write_problematic_reads' if True else '' 
+        read1_thresh = lambda wildcards: int(samplesheet.loc[wildcards.sample,'read1_length'] * config['alignment_length_fraction']), 
+        read2_thresh = lambda wildcards: int(samplesheet.loc[wildcards.sample,'read2_length'] * config['alignment_length_fraction']),
+        as_thresh = config['alignment_score_fraction'],
+        ignore_bounds = lambda wildcards: '--ignore_bounds' if samplesheet.loc[wildcards.sample,'ignore_bounds'] else '', 
+        write_problematic_reads = lambda wildcards: '--write_problematic_reads' if True else '',
+        script = os.path.join(SCRIPTS_DIR, "filter_bam_by_matching_contigs2.py")
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
-        'python amplicon-smf/workflow/scripts/filter_bam_by_matching_contigs2.py --bam {input.bam} --out {output.bam} --out_stats {output.out_stats} --failure_modes {output.failure_modes} --problem {output.problematic_reads} --amplicon {input.fa} --min_len_threshold1 {params.read1_thresh} --min_len_threshold2 {params.read2_thresh} --min_as_frac {params.as_thresh} {params.ignore_bounds} {params.write_problematic_reads}'
+        'python {params.script} --bam {input.bam} --out {output.bam} --out_stats {output.out_stats} --failure_modes {output.failure_modes} --problem {output.problematic_reads} --amplicon {input.fa} --min_len_threshold1 {params.read1_thresh} --min_len_threshold2 {params.read2_thresh} --min_as_frac {params.as_thresh} {params.ignore_bounds} {params.write_problematic_reads}'
 
 rule plot_mapped_vs_unmapped_reads:
     input:
@@ -228,18 +197,13 @@ rule plot_mapped_vs_unmapped_reads:
         'results/{experiment}/{sample}/stats/{sample}.bwameth.contig_filtered.stats.txt'
     output:
         'results/{experiment}/plots/{sample}.wasted_reads.pdf'
+    params:
+        script = os.path.join(SCRIPTS_DIR, "count_excluded_reads.py")
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
         # 'python amplicon-smf/workflow/scripts/count_excluded_reads.py --retained {input.ot_bam} --removed {input.problematic_reads} --plot {output}'
-        'python amplicon-smf/workflow/scripts/count_excluded_reads.py --stats {input} --plot {output}'
-
-# # need this to determine whether we should filter out the contigs like 0x-5x or do normal
-# def choose_contig_filtered_bam(wildcards):
-#     if samplesheet.loc[wildcards.sample, 'filter_contigs']:
-#         return 'results/{}/{}/tmp/{}.bwameth.contig_filtered.sam'.format(wildcards.experiment, wildcards.sample, wildcards.sample)
-#     else:
-#         return 'results/{}/{}/tmp/{}.bwameth.sam'.format(wildcards.experiment, wildcards.sample, wildcards.sample)
+        'python {params.script} --stats {input} --plot {output}'
 
 rule sam_to_bam:
     input:
@@ -251,7 +215,7 @@ rule sam_to_bam:
     output:
         'results/{experiment}/{sample}/{sample}.bwameth.bam'
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
         'samtools view -F 1804 -q 30 -bT {input.fa} {input.sam} > {output}'
 
@@ -261,7 +225,7 @@ rule sort_index_bam:
     output:
         'results/{experiment}/{sample}/{sample}.{extra}.sorted.bam'
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
         '''
         samtools sort {input} > {output}
@@ -270,17 +234,18 @@ rule sort_index_bam:
 
 rule filter_uncoverted:
     input:
-        bam='results/{experiment}/{sample}/{sample}.bwameth.sorted.bam',
-        fa='results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa'
+        bam = 'results/{experiment}/{sample}/{sample}.bwameth.sorted.bam',
+        fa = 'results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa'
     output:
-        bam='results/{experiment}/{sample}/{sample}.bwameth.filtered.bam',
-        plot='results/{experiment}/plots/{sample}.nonconverted_reads.png'
+        bam = 'results/{experiment}/{sample}/{sample}.bwameth.filtered.bam',
+        plot = 'results/{experiment}/plots/{sample}.nonconverted_reads.png'
     params:
-        cfrac=lambda wildcards: 0.001 if samplesheet.loc[wildcards.sample, 'deaminase'] else config.get('unconverted_frac', 0.85) 
+        cfrac = lambda wildcards: 0.001 if samplesheet.loc[wildcards.sample, 'deaminase'] else config.get('unconverted_frac', 0.85),
+        script = os.path.join(SCRIPTS_DIR, "mark-nonconverted-reads-and-plot.py")
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
-        'python amplicon-smf/workflow/scripts/mark-nonconverted-reads-and-plot.py --reference {input.fa} --bam {input.bam} --out {output.bam} --plot {output.plot} --c_frac {params.cfrac}'
+        'python {params.script} --reference {input.fa} --bam {input.bam} --out {output.bam} --plot {output.plot} --c_frac {params.cfrac}'
 
 # rule methylation_percentage:
 #     input:
@@ -294,7 +259,7 @@ rule run_methyldackel:
     output:
         'results/{experiment}/{sample}/{sample}.bwameth.filtered.sorted_CpG.bedGraph'
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
         # 'MethylDackel extract --CHG --CHH --keepSingleton --keepDiscordant {input.fa} {input.bam}'
         # 'MethylDackel extract --CHG --CHH --ignoreFlags 3584 {input.fa} {input.bam}'
@@ -310,14 +275,15 @@ rule plot_bulk_methylation:
     output:
         'results/{experiment}/plots/{sample}.bulk_plots.pdf'
     params:
-        prefix='results/{experiment}/{sample}/{sample}.bwameth.filtered.sorted',
-        cpg=lambda wildcards: '--include_cpg' if samplesheet.loc[wildcards.sample, 'include_cpg'] else '',
-        no_endog_meth=lambda wildcards: '--no_endog_meth' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else '',
-        deaminase=lambda wildcards: '--deaminase' if samplesheet.loc[wildcards.sample, 'deaminase'] else ''
+        prefix = 'results/{experiment}/{sample}/{sample}.bwameth.filtered.sorted',
+        cpg = lambda wildcards: '--include_cpg' if samplesheet.loc[wildcards.sample, 'include_cpg'] else '',
+        no_endog_meth = lambda wildcards: '--no_endog_meth' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else '',
+        deaminase = lambda wildcards: '--deaminase' if samplesheet.loc[wildcards.sample, 'deaminase'] else '',
+        script = os.path.join(SCRIPTS_DIR, "plot_bulk_methylation_signal.py")
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
-        'python amplicon-smf/workflow/scripts/plot_bulk_methylation_signal.py --input {params.prefix} --amplicon {input.fa} --plot {output} {params.cpg} {params.no_endog_meth} {params.deaminase}'
+        'python {params.script} --input {params.prefix} --amplicon {input.fa} --plot {output} {params.cpg} {params.no_endog_meth} {params.deaminase}'
 
 rule amplicon_fa_to_peak_bed:
     input:
@@ -325,9 +291,11 @@ rule amplicon_fa_to_peak_bed:
     output:
         'results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.peaklist.bed'
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
+    params:
+        script = os.path.join(SCRIPTS_DIR, "convert_amplicon_fa_to_peaklist.py")
     shell:
-        'python amplicon-smf/workflow/scripts/convert_amplicon_fa_to_peaklist.py {input} {output}'
+        'python {params.script} {input} {output}'
 
 def get_c_type(wildcards):
     if samplesheet.loc[wildcards.sample,'deaminase']:
@@ -351,11 +319,12 @@ rule join_reads_and_first_cluster:
         subset=1000,
         ctype=get_c_type,
         no_endog_meth=lambda wildcards: '-noEndogenousMethylation' if samplesheet.loc[wildcards.sample, 'no_endog_meth'] else '',
-        dedup_on=lambda wildcards: samplesheet.loc[wildcards.sample, 'dedup_on']
+        dedup_on=lambda wildcards: samplesheet.loc[wildcards.sample, 'dedup_on'],
+        script = os.path.join(SCRIPTS_DIR, "dSMF_footprints_clustering_py3.py")
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
-        'mkdir -p {params.matdir}; python amplicon-smf/workflow/scripts/dSMF_footprints_clustering_py3.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap --dedup_on {params.dedup_on}'
+        'mkdir -p {params.matdir}; python {params.script} {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap --dedup_on {params.dedup_on}'
 
 rule plot_bulk_methylation2:
     input:
@@ -364,11 +333,12 @@ rule plot_bulk_methylation2:
     output:
         'results/{experiment}/plots/{sample}.bulk_plots_from_matrices.pdf'
     params:
-        matrix_path='results/{experiment}/{sample}/matrices/{sample}'
+        matrix_path = 'results/{experiment}/{sample}/matrices/{sample}',
+        script = os.path.join(SCRIPTS_DIR, "plot_bulk_methylation_from_matrices.py")
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
-        'python amplicon-smf/workflow/scripts/plot_bulk_methylation_from_matrices.py --input {params.matrix_path} --amplicon {input.fa} --plot {output}'
+        'python {params.script} --input {params.matrix_path} --amplicon {input.fa} --plot {output}'
 
 rule plot_nuc_qc:
     input:
@@ -378,11 +348,12 @@ rule plot_nuc_qc:
         plot='results/{experiment}/plots/{sample}.nuc_len_qc_plots.pdf',
         stats='results/{experiment}/{sample}/stats/{sample}.nuc_len_qc.stats.txt'
     params:
-        matrix_path='results/{experiment}/{sample}/matrices/{sample}'
+        matrix_path = 'results/{experiment}/{sample}/matrices/{sample}',
+        script = os.path.join(SCRIPTS_DIR, "plot_nucleosome_qc.py")
     conda:
-        "envs/python3_v6.yaml"
+        os.path.join(ENV_DIR, "python3_v7.yaml")
     shell:
-        'python amplicon-smf/workflow/scripts/plot_nucleosome_qc.py --input {params.matrix_path} --amplicon {input.fa} --plot {output.plot} --results {output.stats} --gmm'
+        'python {params.script} --input {params.matrix_path} --amplicon {input.fa} --plot {output.plot} --results {output.stats} --gmm'
 
 # rule collate_stats:
 
