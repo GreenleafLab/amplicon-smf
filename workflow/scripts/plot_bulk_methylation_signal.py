@@ -12,31 +12,39 @@ import seaborn as sns
 from common import plot_bulk_smf_trace
 
 
-def plot_bulk_methylation(input_prefix, amplicon_fa, plots, thresh, include_cpg, no_endog_meth, deaminase, save_individual_png):
-    # load amplicon fasta
+def load_amplicon_context_positions(amplicon_fa):
+    '''
+    Parses the amplicon fasta and returns, per amplicon, the 0-based positions of GpC Cs and
+    CpG Cs. The two sets overlap at ambiguous GCG sites (a C that is both preceded and followed
+    by G) - callers that need to treat those specially should intersect/subtract the sets
+    themselves (see plot_background_methylation_qc).
+    '''
     amplicon_to_seq_dict = {}
-    
+
     for r in list(SeqIO.parse(amplicon_fa, "fasta")):
-        # print(r)
         amplicon_to_seq_dict[r.id] = r.seq
 
-    amplicons = amplicon_to_seq_dict.keys()
-
-    # calculate GpC positions (also CpG)
     gpc_pos_dict = {}
     cpg_pos_dict = {}
-    for amplicon in amplicons:
+    for amplicon in amplicon_to_seq_dict:
         gpc_pos_dict[amplicon] = [i for i, b in enumerate(amplicon_to_seq_dict[amplicon]) if b=='C' and amplicon_to_seq_dict[amplicon][max(i-1, 0)]=='G']
         cpg_pos_dict[amplicon] = [i for i, b in enumerate(amplicon_to_seq_dict[amplicon]) if b=='C' and amplicon_to_seq_dict[amplicon][min(i+1, len(amplicon_to_seq_dict[amplicon])-1)]=='G']
 
-    # load bedgraphs
-    bedgraph_chg_str = input_prefix + '_CHG.bedGraph'
-    bedgraph_chh_str = input_prefix + '_CHH.bedGraph'
-    bedgraph_cpg_str = input_prefix + '_CpG.bedGraph'
+    return amplicon_to_seq_dict, gpc_pos_dict, cpg_pos_dict
 
-    bedgraph_chg = pd.read_table(bedgraph_chg_str, skiprows=1, header=None, names=['chr','start','end','pct','meth','unmeth'])
-    bedgraph_chh = pd.read_table(bedgraph_chh_str, skiprows=1, header=None, names=['chr','start','end','pct','meth','unmeth'])
-    bedgraph_cpg = pd.read_table(bedgraph_cpg_str, skiprows=1, header=None, names=['chr','start','end','pct','meth','unmeth'])
+
+def load_bedgraphs(input_prefix):
+    bedgraph_chg = pd.read_table(input_prefix + '_CHG.bedGraph', skiprows=1, header=None, names=['chr','start','end','pct','meth','unmeth'])
+    bedgraph_chh = pd.read_table(input_prefix + '_CHH.bedGraph', skiprows=1, header=None, names=['chr','start','end','pct','meth','unmeth'])
+    bedgraph_cpg = pd.read_table(input_prefix + '_CpG.bedGraph', skiprows=1, header=None, names=['chr','start','end','pct','meth','unmeth'])
+    return bedgraph_chg, bedgraph_chh, bedgraph_cpg
+
+
+def plot_bulk_methylation(input_prefix, amplicon_fa, plots, thresh, include_cpg, no_endog_meth, deaminase, save_individual_png):
+    amplicon_to_seq_dict, gpc_pos_dict, cpg_pos_dict = load_amplicon_context_positions(amplicon_fa)
+    amplicons = amplicon_to_seq_dict.keys()
+
+    bedgraph_chg, bedgraph_chh, bedgraph_cpg = load_bedgraphs(input_prefix)
 
     output_tables = []
 
@@ -119,6 +127,88 @@ def plot_bulk_methylation(input_prefix, amplicon_fa, plots, thresh, include_cpg,
 
     pd.concat(output_tables).to_csv('{}.all_GpC.txt'.format(input_prefix), sep='\t', header=True, index=False)
 
+
+def plot_background_methylation_qc(input_prefix, amplicon_fa, plots, summary_plot, thresh,
+                                    amplicon_stats_path, sample_stats_path):
+    '''
+    Always-on background methylation QC, independent of include_cpg/no_endog_meth/deaminase:
+    per-amplicon traces of (1) "clean" CpG-context methylation (C followed by G, excluding
+    ambiguous GCG sites where the C is also preceded by G - see amplicon-smf/CLAUDE.md for why
+    those are excluded) and (2) "other C" methylation (not preceded or followed by G, matching
+    the definition used to filter reads in mark-nonconverted-reads-and-plot.py), so background/
+    endogenous CpG methylation can be confirmed negligible regardless of which enzyme mode a
+    sample was run in. Also writes amplicon-level and sample-level summary stats tables.
+    '''
+    amplicon_to_seq_dict, gpc_pos_dict, cpg_pos_dict = load_amplicon_context_positions(amplicon_fa)
+    bedgraph_chg, bedgraph_chh, bedgraph_cpg = load_bedgraphs(input_prefix)
+
+    amplicon_rows = []
+    summary_tables = []
+
+    for amplicon in amplicon_to_seq_dict:
+        gpcs = set(gpc_pos_dict[amplicon])
+        cpgs = set(cpg_pos_dict[amplicon])
+        clean_cpgs = cpgs - gpcs
+
+        all_c_df = pd.concat([
+            bedgraph_chg.loc[bedgraph_chg['chr'] == amplicon],
+            bedgraph_chh.loc[bedgraph_chh['chr'] == amplicon],
+            bedgraph_cpg.loc[bedgraph_cpg['chr'] == amplicon],
+        ]).sort_values('start')
+
+        all_c_df['total_reads'] = all_c_df['meth'] + all_c_df['unmeth']
+        all_c_df = all_c_df.loc[all_c_df['total_reads'] > thresh]
+
+        if len(all_c_df) == 0:
+            print('No data for {} (background methylation QC)'.format(amplicon))
+            continue
+
+        clean_cpg_df = all_c_df.loc[all_c_df.start.isin(clean_cpgs)].copy()
+        other_c_df = all_c_df.loc[~all_c_df.start.isin(gpcs | cpgs)].copy()
+
+        if len(clean_cpg_df) > 0:
+            plot_bulk_smf_trace(clean_cpg_df, plots, title='{}: background CpG (non-GCG)'.format(amplicon),
+                                 smf_col='pct', ylabel='%methylated', ylim=(0, 103))
+        if len(other_c_df) > 0:
+            plot_bulk_smf_trace(other_c_df, plots, title='{}: other C (non-GpC, non-CpG)'.format(amplicon),
+                                 smf_col='pct', ylabel='%methylated', ylim=(0, 103))
+
+        amplicon_rows.append({
+            'amplicon': amplicon,
+            'cpg_methylation_pct': clean_cpg_df['pct'].mean() if len(clean_cpg_df) else float('nan'),
+            'other_c_methylation_pct': other_c_df['pct'].mean() if len(other_c_df) else float('nan'),
+            'n_cpg_positions': len(clean_cpg_df),
+            'n_other_c_positions': len(other_c_df),
+        })
+
+        if len(clean_cpg_df) > 0:
+            summary_tables.append(clean_cpg_df.assign(amplicon=amplicon, context='CpG (non-GCG)'))
+        if len(other_c_df) > 0:
+            summary_tables.append(other_c_df.assign(amplicon=amplicon, context='other C'))
+
+    # amplicon-level table stays wide/headered (for plotting straight from the file)
+    amplicon_df = pd.DataFrame(amplicon_rows)
+    amplicon_df.to_csv(amplicon_stats_path, sep='\t', index=False, header=True)
+
+    # sample-level file is tidy metric\tvalue (no header), matching every other simple
+    # stats file in stats/ (mapped/unmapped, failure_modes, nuc_len_qc), so a generic
+    # collector can grab it without knowing anything about what it means
+    with open(sample_stats_path, 'w') as f:
+        f.write('cpg_methylation_pct\t{:.4f}\n'.format(amplicon_df['cpg_methylation_pct'].mean()))
+        f.write('other_c_methylation_pct\t{:.4f}\n'.format(amplicon_df['other_c_methylation_pct'].mean()))
+        f.write('n_amplicons\t{}\n'.format(len(amplicon_df)))
+
+    if summary_tables:
+        fig, ax = plt.subplots(figsize=(max(6, 0.5 * amplicon_df['amplicon'].nunique()), 5))
+        sns.barplot(data=pd.concat(summary_tables), x='amplicon', y='pct', hue='context', ax=ax)
+        ax.set_ylabel('%methylated')
+        ax.set_xlabel('')
+        plt.xticks(rotation=90)
+        plt.tight_layout()
+        fig.savefig(summary_plot)
+        plt.close(fig)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Plots bulk methylation signal across amplicons')
     parser.add_argument("--input", dest="input", type=str, help="Prefix for the bedgraph files from MethylDackel extract (with suffix e.g. _CHG.bedGraph")
@@ -131,6 +221,10 @@ if __name__ == '__main__':
     parser.add_argument('--deaminase', dest='deaminase', action='store_true', help="Whether this was a deaminase experiment")
     parser.add_argument('--save_png', dest='save_individual_png', action='store_true', help="Save each individual plot as separate png")
     parser.set_defaults(save_individual_png=False)
+    parser.add_argument("--background_plot", dest="background_plot_file", type=str, help="Path to output background CpG/other-C trace plots file (always generated, regardless of include_cpg/no_endog_meth/deaminase)")
+    parser.add_argument("--background_summary_plot", dest="background_summary_plot_file", type=str, help="Path to output background methylation per-amplicon summary plot")
+    parser.add_argument("--background_amplicon_stats", dest="background_amplicon_stats_file", type=str, help="Path to output amplicon-level background methylation stats table")
+    parser.add_argument("--background_sample_stats", dest="background_sample_stats_file", type=str, help="Path to output sample-level (one row) background methylation stats table")
 
     args = parser.parse_args()
 
@@ -139,3 +233,7 @@ if __name__ == '__main__':
     with PdfPages(args.plot_file) as plots:
         # plot_bulk_methylation(args.input, args.amplicon_fa, args.output, plots, args.thresh, args.save_individual_png)
         plot_bulk_methylation(args.input, args.amplicon_fa, plots, args.thresh, args.include_cpg, args.no_endog_meth, args.deaminase, args.save_individual_png)
+
+    with PdfPages(args.background_plot_file) as background_plots:
+        plot_background_methylation_qc(args.input, args.amplicon_fa, background_plots, args.background_summary_plot_file,
+                                        args.thresh, args.background_amplicon_stats_file, args.background_sample_stats_file)

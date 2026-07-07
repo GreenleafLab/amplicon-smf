@@ -308,7 +308,11 @@ rule plot_bulk_methylation:
         bg='results/{experiment}/{sample}/{sample}.bwameth.filtered.sorted_CpG.bedGraph',
         fa='results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa'
     output:
-        'results/{experiment}/plots/{sample}.bulk_plots.pdf'
+        plot='results/{experiment}/plots/{sample}.bulk_plots.pdf',
+        background_plot='results/{experiment}/plots/{sample}.background_cpg_methylation.pdf',
+        background_summary_plot='results/{experiment}/plots/{sample}.background_cpg_methylation.summary.pdf',
+        background_amplicon_stats='results/{experiment}/{sample}/stats/{sample}.background_cpg_methylation.amplicon_level.txt',
+        background_sample_stats='results/{experiment}/{sample}/stats/{sample}.background_cpg_methylation.sample_level.txt'
     params:
         prefix='results/{experiment}/{sample}/{sample}.bwameth.filtered.sorted',
         cpg=lambda wildcards: '--include_cpg' if samplesheet.loc[wildcards.sample, 'include_cpg'] else '',
@@ -317,7 +321,10 @@ rule plot_bulk_methylation:
     conda:
         "envs/python3_v6.yaml"
     shell:
-        'python amplicon-smf/workflow/scripts/plot_bulk_methylation_signal.py --input {params.prefix} --amplicon {input.fa} --plot {output} {params.cpg} {params.no_endog_meth} {params.deaminase}'
+        'python amplicon-smf/workflow/scripts/plot_bulk_methylation_signal.py --input {params.prefix} --amplicon {input.fa} --plot {output.plot} '
+        '--background_plot {output.background_plot} --background_summary_plot {output.background_summary_plot} '
+        '--background_amplicon_stats {output.background_amplicon_stats} --background_sample_stats {output.background_sample_stats} '
+        '{params.cpg} {params.no_endog_meth} {params.deaminase}'
 
 rule amplicon_fa_to_peak_bed:
     input:
@@ -356,6 +363,16 @@ rule join_reads_and_first_cluster:
         "envs/python3_v6.yaml"
     shell:
         'mkdir -p {params.matdir}; python amplicon-smf/workflow/scripts/dSMF_footprints_clustering_py3.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap --dedup_on {params.dedup_on}'
+
+rule compute_duplication_rate:
+    input:
+        'results/{experiment}/{sample}/{sample}.amplicon_stats.txt'
+    output:
+        'results/{experiment}/{sample}/stats/{sample}.duplication_rate.stats.txt'
+    conda:
+        "envs/python3_v6.yaml"
+    shell:
+        'python amplicon-smf/workflow/scripts/compute_duplication_rate.py --input {input} --output {output}'
 
 rule plot_bulk_methylation2:
     input:

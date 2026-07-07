@@ -12,6 +12,8 @@ import seaborn as sns
 # import re
 from matplotlib.patches import Circle, Ellipse
 from scipy.cluster.hierarchy import fcluster, fclusterdata, linkage, dendrogram 
+import pickle
+from sklearn.cluster import KMeans, MiniBatchKMeans
 
 # Note: assumes the input plot is a PdfPages (and so calls the savefig method on it)
 # we can probably make this generic for other plotting types later (i.e. if pdfpages: plots.savefig() vs. ...)
@@ -322,3 +324,66 @@ def adjust_gcgs(mat, gcg_pos, fix_pos):
     
     return mat
 
+def assign_cluster(mat, model):
+    # load the model
+    with open(model, "rb") as m:
+        kmeans_model = pickle.load(m)
+
+    # Debug: Check dimensions
+    print(f"Matrix shape: {mat.shape}")
+    print(f"Expected features: {kmeans_model.n_features_in_}")
+
+    # cluster
+    promoter_clusters = np.asarray(kmeans_model.predict(mat), dtype=np.int8)
+
+    return promoter_clusters
+
+# def annotate_40_clusters(promoter_annot_df, promoter_on):
+#     '''
+#     basically, once we have an "old" (40) cluster assigned
+#     we want to annotate things about it, like whether it's open or whatever
+#     '''
+
+#     promoter_is_on = promoter_annot_df['cluster'].astype('int8').isin(promoter_on)
+
+#     return promoter_is_on
+
+def annotate_40_clusters(promoter_annot_df, promoter_on):
+    '''
+    basically, once we have an "old" (40) cluster assigned
+    we want to annotate things about it, like whether it's open or whatever
+    This is the ChadGPT version that uses some weird broadcasting trick that avoids huge memory spikes?
+    '''
+    print(f"Annotating {len(promoter_annot_df):,} molecules")
+    
+    # Convert to numpy array (bypass pandas entirely)
+    cluster_array = promoter_annot_df['cluster'].to_numpy(dtype=np.int8, copy=True)
+    promoter_on_array = np.array(promoter_on, dtype=np.int8)
+    
+    print(f"Cluster array shape: {cluster_array.shape}")
+    print(f"Promoter_on values: {promoter_on_array}")
+    
+    # Broadcasting: creates temporary (5M, 11) bool array = ~55 MB
+    # This is WAY more memory efficient than pandas isin() internals
+    promoter_is_on = (cluster_array[:, None] == promoter_on_array).any(axis=1)
+    
+    n_on = promoter_is_on.sum()
+    print(f"Result: {n_on:,} ON ({n_on/len(promoter_is_on)*100:.1f}%), "
+          f"{(~promoter_is_on).sum():,} OFF")
+    
+    return promoter_is_on
+
+def assign_promoter_footprints(nuc_filtered_mat, promoter_regions):
+    '''
+    basically asks if there is a consensus (average in region and round up) footprint in the regions defined in promoter_regions
+    '''
+    fp_df_to_return = pd.DataFrame(index=nuc_filtered_mat.index)
+    for reg in promoter_regions:
+        print(reg)
+        reg_start, reg_end = promoter_regions[reg]
+        sub_df = nuc_filtered_mat[[c for c in nuc_filtered_mat.columns if (c > reg_start and c < reg_end)]]
+        fp_series = (sub_df.mean(axis=1) >= 0.5)
+
+        fp_df_to_return[reg] = fp_series
+
+    return fp_df_to_return

@@ -45,10 +45,15 @@ def all_input(wildcards):
         experiment = samplesheet.loc[sample, 'experiment']
 
         wanted_input.append('results/{e}/plots/{s}.bulk_plots.pdf'.format(e=experiment, s=sample))
+        wanted_input.append('results/{e}/plots/{s}.background_cpg_methylation.pdf'.format(e=experiment, s=sample))
+        wanted_input.append('results/{e}/plots/{s}.background_cpg_methylation.summary.pdf'.format(e=experiment, s=sample))
+        wanted_input.append('results/{e}/{s}/stats/{s}.background_cpg_methylation.amplicon_level.txt'.format(e=experiment, s=sample))
+        wanted_input.append('results/{e}/{s}/stats/{s}.background_cpg_methylation.sample_level.txt'.format(e=experiment, s=sample))
         wanted_input.append('results/{e}/plots/{s}.bulk_plots_from_matrices.pdf'.format(e=experiment, s=sample))
         if True: #samplesheet.loc[sample, 'filter_contigs']:
             wanted_input.append('results/{e}/plots/{s}.wasted_reads.pdf'.format(e=experiment, s=sample))
         wanted_input.append('results/{e}/{s}/{s}.amplicon_stats.txt'.format(e=experiment, s=sample))
+        wanted_input.append('results/{e}/{s}/stats/{s}.duplication_rate.stats.txt'.format(e=experiment, s=sample))
         wanted_input.append('results/{e}/plots/{s}.nuc_len_qc_plots.pdf'.format(e=experiment, s=sample))
         wanted_input.append('results/qc/fastqc/fastqc.txt')
         # wanted_input.append('results/qc/fastqc/{}_fastqc.html'.format(path.basename(samplesheet.loc[sample,'fastq_R1']).replace('.fastq.gz','')))
