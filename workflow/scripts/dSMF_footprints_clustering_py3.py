@@ -60,6 +60,19 @@ def parse_args():
             "'allC' = all cytosines in the region."
         ),
     )
+    p.add_argument(
+        "--cpg_meth_stats",
+        default=None,
+        help=(
+            "Optional path for a per-read GpC-uncontaminated (clean, non-GCG) CpG "
+            "methylation table with columns: amplicon, read_id, n_clean_cpg_covered, "
+            "n_clean_cpg_methylated, frac_cpg_meth. Side output only -- does NOT affect "
+            "the accessibility matrices or any other output. Intended as an endogenous "
+            "CpG-methylation-per-molecule QC/filter. Rows are only computed for M.CviPI "
+            "samples (skipped when c_type=='allC', i.e. deaminase); the file is still "
+            "created with just a header in that case so it can be a fixed Snakemake output."
+        ),
+    )
 
     return p.parse_args()
 
@@ -248,6 +261,41 @@ def score_read_against_region(
 
     return scores, covered
 
+def clean_cpg_positions(ref: str) -> List[int]:
+    """
+    Region-relative indices of the C in a "clean" CpG: a C immediately followed by G,
+    but NOT immediately preceded by G. Excluding the preceded-by-G case drops GCG
+    trinucleotides, whose C is simultaneously the C of a GpC (an M.CviPI target) -- so
+    this is the GpC-uncontaminated CpG set, matching `clean_cpgs = cpgs - gpcs` used by
+    the background-methylation QC (plot_bulk_methylation_signal.py). This measures
+    endogenous CpG methylation rather than GpC-MTase accessibility leaking via GCG.
+    """
+    L = len(ref)
+    pos = []
+    for i in range(L - 1):
+        if ref[i] == "C" and ref[i + 1] == "G" and (i == 0 or ref[i - 1] != "G"):
+            pos.append(i)
+    return pos
+
+def score_clean_cpg_read(rstart: int, rseq: str, region_start: int,
+                         clean_positions: List[int]) -> Tuple[int, int]:
+    """
+    Count, for one (merged) read, the covered clean-CpG sites and how many are
+    methylated. Same convention as score_read_against_region: a site is "covered" if
+    the read spans it, and endogenous CpG methylation = an unconverted cytosine (the
+    base still reads 'C'). Returns (n_covered, n_methylated).
+    """
+    n_cov = 0
+    n_meth = 0
+    Lr = len(rseq)
+    for i in clean_positions:
+        rr = (region_start + i) - rstart   # read-relative index of this base
+        if 0 <= rr < Lr:
+            n_cov += 1
+            if rseq[rr] == "C":
+                n_meth += 1
+    return n_cov, n_meth
+
 def cluster_rows_kmeans(X: np.ndarray, n_clusters: int = 4):
     """
     K-means on ternary {-1,0,1} matrices.
@@ -417,7 +465,17 @@ def main():
     bam = pysam.AlignmentFile(args.bam, "rb")
     fa = pysam.FastaFile(args.fa)
 
-    with open(args.out_qc_file, "w") as out_qc, open(args.peaks) as pl:
+    # Optional per-read clean-CpG methylation side output. Always create the file (so it
+    # can be a fixed Snakemake output), but only compute rows for M.CviPI samples --
+    # deaminase readout uses c_type=='allC', where this stat is not meaningful.
+    cpg_fh = open(args.cpg_meth_stats, "w") if args.cpg_meth_stats else None
+    compute_cpg = False
+    if cpg_fh is not None:
+        cpg_fh.write("amplicon\tread_id\tn_clean_cpg_covered\tn_clean_cpg_methylated\tfrac_cpg_meth\n")
+        compute_cpg = (args.c_type != "allC")
+
+    try:
+      with open(args.out_qc_file, "w") as out_qc, open(args.peaks) as pl:
         out_qc.write("amplicon\ttotal_reads\tobserved_states\treads_per_state\n")
 
         for raw in pl:
@@ -447,6 +505,9 @@ def main():
             # Reference
             ref = fa.fetch(chrom, start, end).upper()
 
+            # Clean (GpC-uncontaminated) CpG positions for the optional per-read stat
+            clean_cpg_pos = clean_cpg_positions(ref) if compute_cpg else []
+
             # Collect alignments overlapping region
             rows = []
             for aln in bam.fetch(chrom, start, end):
@@ -468,6 +529,7 @@ def main():
             allC_scores_list: List[np.ndarray] = []     # all Cs for deduplication (only used if dedup_on == 'allC')
             cover_counts: List[int] = []
             ids: List[str] = []
+            cpg_stats_list: List[Tuple[int, int]] = []   # (n_covered, n_methylated) per retained read
 
             for qname, g in df.groupby("qname", sort=False):
                 segs = list(zip(g["rstart"].to_numpy(), g["seq"].to_numpy()))
@@ -498,6 +560,12 @@ def main():
                 cover_counts.append(int(cov.sum()))
                 ids.append(qname)
 
+                # Per-read clean-CpG methylation (side stat; same molecule set as the matrix)
+                if clean_cpg_pos:
+                    cpg_stats_list.append(
+                        score_clean_cpg_read(rstart_m, seq_m, start, clean_cpg_pos)
+                    )
+
                 # Optionally: score all cytosines for deduplication basis
                 if args.dedup_on == "allC":
                     if args.c_type == "allC":
@@ -517,6 +585,14 @@ def main():
             if not scores_ctx_list:
                 print(f"No reads retained for: {label}")
                 continue
+
+            # Per-read clean-CpG methylation side output (all retained reads, pre-dedup:
+            # a superset of the dedup matrix's read IDs, so it joins to either matrix).
+            if cpg_fh is not None and clean_cpg_pos:
+                for qname, (n_cov, n_meth) in zip(ids, cpg_stats_list):
+                    frac = f"{n_meth / n_cov:.4f}" if n_cov > 0 else "nan"
+                    cpg_fh.write(f"{label}\t{qname}\t{n_cov}\t{n_meth}\t{frac}\n")
+                cpg_fh.flush()
 
             # 1) Build matrix for requested context
             scores_ctx_arr = np.vstack(scores_ctx_list).astype(int, copy=False)
@@ -579,8 +655,11 @@ def main():
                     out_png = f"{args.out_prefix}.{label}.matrix.png"
                     make_heatmap(clust_scores, out_png)
 
-    bam.close()
-    fa.close()
+    finally:
+        bam.close()
+        fa.close()
+        if cpg_fh is not None:
+            cpg_fh.close()
 
 
 if __name__ == "__main__":

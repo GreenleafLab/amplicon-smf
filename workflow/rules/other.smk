@@ -351,7 +351,8 @@ rule join_reads_and_first_cluster:
         fa='results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.fa',
         peaks='results/{experiment}/{sample}/tmp/{sample}.amplicon.revcomp.peaklist.bed'
     output:
-        'results/{experiment}/{sample}/{sample}.amplicon_stats.txt'
+        stats='results/{experiment}/{sample}/{sample}.amplicon_stats.txt',
+        cpg_per_read='results/{experiment}/{sample}/{sample}.cpg_methylation_per_read.txt'
     params:
         prefix='results/{experiment}/{sample}/matrices/{sample}',
         matdir='results/{experiment}/{sample}/matrices',
@@ -362,7 +363,7 @@ rule join_reads_and_first_cluster:
     conda:
         "envs/python3_v6.yaml"
     shell:
-        'mkdir -p {params.matdir}; python amplicon-smf/workflow/scripts/dSMF_footprints_clustering_py3.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap --dedup_on {params.dedup_on}'
+        'mkdir -p {params.matdir}; python amplicon-smf/workflow/scripts/dSMF_footprints_clustering_py3.py {input.bam} {input.fa} {params.ctype} {input.peaks} 0 1 2 3 {params.prefix} {output.stats} -label 0 -unstranded -subset {params.subset} {params.no_endog_meth} -cluster -heatmap --dedup_on {params.dedup_on} --cpg_meth_stats {output.cpg_per_read}'
 
 rule compute_duplication_rate:
     input:

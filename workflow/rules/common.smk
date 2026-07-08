@@ -53,6 +53,7 @@ def all_input(wildcards):
         if True: #samplesheet.loc[sample, 'filter_contigs']:
             wanted_input.append('results/{e}/plots/{s}.wasted_reads.pdf'.format(e=experiment, s=sample))
         wanted_input.append('results/{e}/{s}/{s}.amplicon_stats.txt'.format(e=experiment, s=sample))
+        wanted_input.append('results/{e}/{s}/{s}.cpg_methylation_per_read.txt'.format(e=experiment, s=sample))
         wanted_input.append('results/{e}/{s}/stats/{s}.duplication_rate.stats.txt'.format(e=experiment, s=sample))
         wanted_input.append('results/{e}/plots/{s}.nuc_len_qc_plots.pdf'.format(e=experiment, s=sample))
         wanted_input.append('results/qc/fastqc/fastqc.txt')
