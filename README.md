@@ -77,6 +77,84 @@ There's also a QC folder, which currently only has fastqc results. I hope one da
 `python workflow/scripts/classify_single_molecule_binding_v2.py --input /path/to/[samp]/matrices/[samp].[amp].full_unclustered.matrix --output /path/to/output/[samp].[amp].single_molecule_classification.txt --all_states_output /path/to/output/[samp].[amp].valid_states_table.txt --precomputed_states_file ./tmp/[amp].valid_states_table.pkl --plot /path/to/output/[samp].[amp].single_molecule_clustering.pdf --positions /path/to/positions.txt --amplicon_name [amp] --reads_to_plot 50`
 The positions file can be created from the amplicon fasta file and a fasta file containing one entry per motif using `workflow/scripts/convert_fa_to_positions_for_script.py`.
 
+**Note on the positions file (changed 2026-08-03):** `convert_fa_to_positions_for_script.py` now
+defaults to `--l_offset 0 --r_offset 0`, i.e. it writes the **bare motif span** and lets the
+classifier extend the flanks itself at runtime (`--tf_margin`, default 2). It previously defaulted
+to `2/2`, which double-extended each motif window (offsets baked into the file *and* added again by
+`tf_margin`). Coordinates are emitted in the reverse-complement / bottom-strand frame — the same
+frame as the single-molecule matrix columns — and each window is **half-open** `[start, end)`. Pass
+`--l_offset 2 --r_offset 2` explicitly if you need to reproduce an old file.
+
+### Running the v5 HSMM binding model
+`classify_single_molecule_binding_v5_hsmm.py` is a newer, structurally different binding model. Instead
+of enumerating every global chromatin microstate (nucleosome × TF combinations) and picking the
+max-likelihood one, it decodes **each molecule independently** with a segmental hidden semi-Markov
+Viterbi pass over base-pair space. Each molecule is segmented into a sequence of:
+
+- `OPEN` — accessible linker (low protection probability)
+- `NUC` — nucleosome; dyad at the segment center, footprint width tied to the segment length, extent
+  variability carried by a duration prior peaked at ~147bp. Adjacent nucleosomes decode as two
+  back-to-back `NUC` segments, not one long one.
+- `TF` — bound TF; only allowed spanning an annotated motif from the positions file (± `--tf_margin`)
+- `UNID` — **new capability:** an unidentified footprint. A protected stretch that is neither at an
+  annotated motif nor nucleosome-length. Carries a higher entry cost, so it's the explanation of last
+  resort. This is the discovery channel for footprints you haven't named yet.
+
+Things v4 and earlier hand-coded as ad-hoc penalties (TF boundary rules, run-length caps, parsimony,
+di-nucleosome handling) instead fall out of emissions + duration priors + transition costs.
+
+`python workflow/scripts/classify_single_molecule_binding_v5_hsmm.py --input /path/to/[samp]/matrices/[samp].[amp].dedup.full_unclustered.matrix --output /path/to/output/[samp].[amp].single_molecule_classification.txt --plot /path/to/output/[samp].[amp].hsmm.pdf --positions /path/to/positions.txt --amplicon_name [amp] --reads_to_plot 20`
+
+**Required args are just those six** (`--input --output --plot --positions --amplicon_name`, plus
+`--reads_to_plot` if you want per-read pages). Everything else is a calibrated default. `--amp_width`
+is auto-detected from the matrix if not given. Settings can also be supplied as a YAML file via
+`--config` (CLI flags override it).
+
+#### Outputs — a new schema, deliberately not backward-compatible
+v5 does **not** enumerate a global state space, so there is **no `idx` column and no
+`valid_states_table.txt`**. It writes:
+1. `<output>` — one row per molecule, indexed by `read_id`: `tfbs_1..K` (bool per annotated motif),
+   `n_tf` / `n_nuc` / `n_unid` counts, `nucs` (`start:end:dyad;...`), `unids` (`start:end;...`),
+   `log_likelihood`.
+2. `<output>.segments.txt` (or `--segments_output`) — tidy long format, **one row per Viterbi
+   segment**: `read_id, seg_index, type, start, end, dyad_or_motif, seg_loglik`. This is the
+   preferred substrate for nucleosome / occupancy analyses.
+3. `<plot>` — a per-bp NUC/TF/UNID occupancy + bulk diagnostic page, a bulk data-vs-prediction sanity
+   panel, and per-read traces with segments drawn.
+
+Consequences for existing downstream code: anything that only sums `tfbs_*` columns works unchanged.
+Anything that reads the old ragged `nuc{N}_start`/`nuc{N}_end` columns must move to the `nucs` string
+or (better) the segments file. **`fit_partition_function_model_v3.py` is not compatible** — it needs
+`valid_states_table.txt` + `idx`, which v5 does not produce.
+
+#### Knobs worth knowing
+- `--do_em` (off by default) fits emission + nucleosome duration params from the data by Viterbi/hard
+  EM. The shipped defaults are hand-calibrated and work as-is; only reach for this if you have a
+  reason. `prob_unmeth_given_open` and `nuc_sigma` are unstable under hard EM and must be opted into
+  via `--em_fit`.
+- `--nuc_min_prot_gpcs` (default 3) is an evidence floor: a `NUC` segment needs at least this many
+  observed-protected GpCs, which suppresses spurious edge nucleosomes called off 1–2 GpCs.
+- `--promoter_positions lo,hi` + `--prob_unmeth_given_open_promoter` let the "open" protection
+  probability differ inside a promoter window.
+- `--grid_step` (default 5) is the segment-boundary grid resolution; decoding is O(G²·S) in the number
+  of grid points, so lowering it costs runtime quadratically.
+- `--discover_footprints` / `--discovered_footprints_file` / `--motif_track_file` are optional extras
+  (empirical-Bayes footprint discovery and a cosmetic motif overlay). The helper scripts that produce
+  those input files are not in this commit; leave the flags off and everything works.
+
+#### Sanity check before you point it at real data
+`workflow/scripts/test_v5_hsmm.py` is a self-contained set of synthetic segmentation tests — it
+builds molecules with known, noise-free footprint patterns and asserts the Viterbi decode recovers
+them (lone TF, adjacent TFs, single nucleosome, nucleosome + TF, off-motif UNID, di-nucleosome,
+all-open, missing data). It needs no input data and no pipeline output, just numpy and this repo:
+
+`cd workflow/scripts && python test_v5_hsmm.py`
+
+Expect `8/8 passed`. Run this first — if it fails, the problem is your environment, not your data.
+
+Reasonable first pass: run it with only the required args on one sample × amplicon, then read the
+diagnostic pages at the front of the PDF before trusting any per-molecule call.
+
 ### Running the partition function model
 `python workflow/scripts/fit_partition_function_model_v3.py --basedir /path/to/output/ --sample [samp] --amplicons [comma,separated,list,of,amplicons] --plot /path/to/output/[samp].fit.pdf --model {'3param_nuc', '2param', '3param_tfcoop'} --output /path/to/output/[samp].fit.txt`
 
