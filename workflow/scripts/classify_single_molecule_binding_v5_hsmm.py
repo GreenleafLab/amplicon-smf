@@ -36,12 +36,33 @@ Decoding is O(G^2 * S) grid-segments per molecule (G = boundary grid points, S =
 across all molecules at once. No global state enumeration, no pruning, no collapse.
 
 Outputs (new clean schema -- deliberately NOT coerced back to v4's bin-based columns):
-  1. <output>                : one row per molecule -- read_id, n_tf/n_nuc/n_unid, tfbs_{k}
-                               binary calls, semicolon-joined nuc and unid interval lists,
-                               log_likelihood (total Viterbi path score).
+  1. <output>                : one row per molecule -- read_id, tfbs_{k} binary calls (legacy,
+                               positional), site_{name} binary calls (stable, from the positions
+                               file's name column), n_tf / n_tf_teto / n_tf_other / n_nuc / n_unid,
+                               semicolon-joined nuc and unid interval lists, log_likelihood.
+                               ** Use n_tf_teto, not n_tf, for "how many TetOs are bound" --
+                               n_tf counts every named site and so grows as promoter footprints
+                               (TATA/BRE/Inr/...) are added to the positions file. Same trap
+                               applies to `df.filter(like='tfbs_').sum(axis=1)`. **
   2. <output>.segments.txt   : tidy long-format Viterbi path -- one row per segment
-                               (read_id, seg_index, type, start, end, dyad_or_motif, seg_loglik).
-  3. <plot>                  : per-read traces with NUC (gray) / TF (red) / UNID (purple) drawn.
+                               (read_id, seg_index, type, start, end, dyad_or_motif, motif_name).
+  3. <output>.tfbs_index.txt : sidecar index -> (name, lo, hi, is_teto) map, so an old file's
+                               positional tfbs_{k} columns stay interpretable after the
+                               positions file is edited.
+  4. <plot>                  : per-read traces with NUC (gray) / TF (red) / UNID (purple) drawn.
+
+With --regions <build_promoter_regions.py file>, the main file also gains REGION-ANCHORED
+per-molecule columns -- the only ones that know what a TSS or promoter is:
+  tss_nuc / tss_footprint / tss_open    state of the TSS column itself (NUC / UNID|TF / neither)
+  promoter_nuc_gt50                     >50% of the promoter INSERT covered by NUC
+  nuc_bases_promoter, frac_nuc_promoter, promoter_len   (carry these -- see caveat)
+  {region}_bases_{type}, _frac_, _any_  for every region x segment type (plus1_nuc, TATA, ...)
+** Promoter insert lengths are NOT uniform (264 bp for most opoBD9 promoters, RPS9 200,
+minCMV 59), so `promoter_nuc_gt50` is NOT comparable across promoters of different length --
+at 59 bp the threshold is 30 bp, which almost any grazing nucleosome clears. Use
+--promoter_nuc_min_bp for an absolute-bp column when comparing across promoters. **
+Computed via annotate_molecule_regions.annotate_one() -- the same function the post-hoc
+annotator uses, on the same tidy segments table, so inline and post-hoc agree exactly.
 
 EM parameter fitting is available behind --do_em (Viterbi / hard EM). By default it fits only the
 safe set (prob_unmeth_given_tf, prob_unmeth_given_unid, nuc_mode); structural costs, conversion
@@ -53,7 +74,9 @@ hand-calibrated and work as-is.
 import argparse
 import os
 import os.path
+import re
 import warnings
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace as dc_replace
 from typing import List, Tuple
 
@@ -151,6 +174,29 @@ class ModelParams:
     unid_min: int = 15
     unid_max: int = 90               # <= nuc_min so a UNID can never be nucleosome-length
 
+    # --- UNID / motif exclusivity (2026-08-12) ---
+    # Historically a UNID could not overlap ANY positions-file motif (hard `continue` in the DP).
+    # That ban is REDUNDANT for its apparent purpose: prob_unmeth_given_tf == prob_unmeth_given_unid
+    # (both 0.9), so a UNID whose span coincides with a motif has an IDENTICAL emission to the TF
+    # segment and costs start_cost_unid - start_cost_tf = 5.0 nats more. TF therefore wins every tie
+    # by construction; no constraint is needed to stop UNID "stealing" a named site.
+    # What the ban actually forbids is EXTENT REVISION -- a UNID spanning the motif *plus more* --
+    # i.e. it hard-codes "the annotation is exactly right about the footprint's width". And because
+    # unid_min=15, a modest extension cannot be expressed as a separate abutting UNID either (a 10 bp
+    # flank is below the minimum), so with the ban on, the model literally cannot say "the footprint
+    # is this motif and then a bit more".
+    # Setting unid_may_overlap_motifs=True converts that hard constraint into a soft ~5-nat prior
+    # (~2.25 protected GpCs at 2.22 nats/GpC): a UNID only beats the named site by demonstrating
+    # that much extra protection outside the motif. Well-posed likelihood-ratio test on extent.
+    # ⚠ Scope it. TetO array sites stay exclusive by default (unid_overlap_teto=False) -- a wide UNID
+    # straddling two operators would muddy n_tf_teto, the "how many TetOs bound" readout.
+    # DEFAULT FLIPPED TO True 2026-08-12 (bgrd). Rounds before this date, including attempt2 and the
+    # attempt3 JUNB r3 / RPS9 r2 decodes, ran with the ban ON -- do not compare across the flip
+    # without re-running. Pass --no_unid_may_overlap_motifs to restore the old behavior.
+    unid_may_overlap_motifs: bool = True
+    unid_overlap_teto: bool = False
+    teto_name_prefix: str = 'TetO'   # sites named with this prefix stay UNID-exclusive
+
     # --- structural costs (all POSITIVE; subtracted as log-penalties) ---
     # per-segment "start" costs => parsimony (higher = fewer of that segment type)
     start_cost_open: float = 0.5
@@ -218,8 +264,33 @@ def motif_segments_on_grid(bnd, tfbs_positions, tf_margin):
 
 
 def motif_intervals(tfbs_positions, tf_margin):
-    """List of (lo, hi) bp intervals a UNID segment is forbidden to overlap."""
+    """All motif (lo, hi) bp intervals, margin-padded. Defines where a TF segment is LEGAL."""
     return [(int(t[0]) - tf_margin, int(t[1]) + tf_margin) for t in tfbs_positions]
+
+
+def unid_blocked_intervals(tfbs_positions, tf_margin, params):
+    """
+    Subset of motif_intervals() that a UNID segment may NOT overlap. See the
+    unid_may_overlap_motifs block in ModelParams for why this is a subset and not all of them.
+
+      unid_may_overlap_motifs=False (default)  -> every motif blocks (historical behavior)
+      True, unid_overlap_teto=False            -> only TetO-array sites block; promoter sites are
+                                                  open to extent revision
+      True, unid_overlap_teto=True             -> nothing blocks
+
+    Name matching uses the same case-insensitive prefix rule as is_teto_site(), so an unnamed
+    positions-file entry (no name column) is treated as a promoter site, not an array site.
+    """
+    if not params.unid_may_overlap_motifs:
+        return motif_intervals(tfbs_positions, tf_margin)
+    if params.unid_overlap_teto:
+        return []
+    out = []
+    for t in tfbs_positions:
+        name = str(t[2]).strip() if (len(t) > 2 and t[2] is not None) else ''
+        if is_teto_site(name, params.teto_name_prefix):
+            out.append((int(t[0]) - tf_margin, int(t[1]) + tf_margin))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +492,7 @@ def viterbi_decode(gpc_pos, obs1, obs0, tfbs_positions, params, discovered_footp
     tf_segs_by_end = {}
     for (ai, bi, k) in tf_segs:
         tf_segs_by_end.setdefault(bi, []).append((ai, k))
-    mot_iv = motif_intervals(tfbs_positions, params.tf_margin)
+    mot_iv = unid_blocked_intervals(tfbs_positions, params.tf_margin, params)
 
     # V[j, s, m]  = best log-score of a segmentation of [0, bnd[j]) whose last segment is type s
     # bpA[j, s, m] = start boundary index of that last segment
@@ -497,7 +568,7 @@ def viterbi_decode(gpc_pos, obs1, obs0, tfbs_positions, params, discovered_footp
                         continue
                     lo, hi = bnd[ai], end_bp
                     if any(not (hi <= mlo or lo >= mhi) for (mlo, mhi) in mot_iv):
-                        continue                              # UNID may not overlap a motif
+                        continue          # UNID may not overlap a BLOCKING motif (see mot_iv above)
                     em = flat_emission(UNID, ai, j)
                     sc_unid = scost[UNID]
                     if disc:
@@ -645,6 +716,10 @@ def discover_footprints_from_bulk(mat, gpc_pos, tfbs_positions, params, frac=Non
     if frac is None:                     # raw bulk (nucleosome-CONTAMINATED); prefer a decontaminated
         frac, _ = per_gpc_protection(mat, gpc_pos, paths=None)   # frac (per_gpc_protection(paths=...))
     fr = np.asarray(frac, dtype=float)
+    # DELIBERATELY uses motif_intervals(), not unid_blocked_intervals(): vocabulary discovery is
+    # stage 1 and is FROZEN from attempt2 (README_attempt3.md sec.3). Making it follow
+    # unid_may_overlap_motifs would make the vocabulary itself a second decode-affecting variable
+    # per round. Keep discovery blind to named sites regardless of the DP's exclusivity setting.
     mot_iv = motif_intervals(tfbs_positions, params.tf_margin)
     off_motif = lambda p: not any(mlo <= p <= mhi for (mlo, mhi) in mot_iv)
     flagged = []                                          # (pos, excess_over_background)
@@ -706,7 +781,8 @@ def score_segmentation(segs, gpc_pos, obs1_col, obs0_col, tfbs_positions, params
     """
     trans = build_transition_matrix(params)
     scost = start_costs(params)
-    mot_iv = motif_intervals(tfbs_positions, params.tf_margin)
+    mot_iv = motif_intervals(tfbs_positions, params.tf_margin)              # TF legality
+    unid_iv = unid_blocked_intervals(tfbs_positions, params.tf_margin, params)  # UNID legality
     gpc_pos = np.asarray(gpc_pos, dtype=np.int64)
 
     rows = []
@@ -722,7 +798,7 @@ def score_segmentation(segs, gpc_pos, obs1_col, obs0_col, tfbs_positions, params
         note = ''
         if s == TF and not any(a >= mlo and b <= mhi for (mlo, mhi) in mot_iv):
             note = 'TF-not-at-motif(illegal)'
-        if s == UNID and any(not (b <= mlo or a >= mhi) for (mlo, mhi) in mot_iv):
+        if s == UNID and any(not (b <= mlo or a >= mhi) for (mlo, mhi) in unid_iv):
             note = 'UNID-overlaps-motif(illegal)'
         if s == UNID and not (params.unid_min <= (b - a) <= params.unid_max):
             note = (note + ' ' if note else '') + 'UNID-len-out-of-band'
@@ -839,10 +915,80 @@ def em_mstep(paths, gpc_pos, obs, params, min_obs=100):
 # Output formatting
 # ---------------------------------------------------------------------------
 
-def paths_to_wide(paths, total_ll, read_ids, n_tfbs):
+def tfbs_site_names(tfbs_positions):
     """
-    One row per molecule: tfbs_{k} binary calls + nuc/unid interval lists + counts + log-likelihood.
+    Stable, unique, machine-filterable name for each positions-file site.
+
+    The positions file is `lo,hi,name[,strand]`. The name column is parsed by
+    load_tfbs_positions but was historically never used for output, so molecules were
+    reported only as `tfbs_{k}` where k is ORDER OF APPEARANCE in the positions file.
+    That index is not stable: inserting a promoter site (which sorts BEFORE the array,
+    since the promoter is at LOW matrix columns and TetO at HIGH) renumbers every TetO
+    and silently invalidates any analysis keyed on `tfbs_1..6 == TetO1..6`.
+
+    Names fix that. Every opoBD9 entry is literally `TetO`, so names are not unique on
+    their own -- duplicates get a 1-based ordinal suffix IN FILE ORDER
+    (TetO x6 -> TetO1..TetO6). Sites with no name column fall back to `site{k+1}`.
+
+    Downstream code should key on the NAME, never the index.
     """
+    raw = []
+    for k, t in enumerate(tfbs_positions):
+        nm = str(t[2]).strip() if (len(t) > 2 and str(t[2]).strip()) else ''
+        nm = re.sub(r'[^0-9A-Za-z]+', '_', nm).strip('_')
+        raw.append(nm or 'site{}'.format(k + 1))
+
+    counts = Counter(raw)
+    seen = defaultdict(int)
+    out = []
+    for nm in raw:
+        if counts[nm] > 1:
+            seen[nm] += 1
+            out.append('{}{}'.format(nm, seen[nm]))
+        else:
+            out.append(nm)
+
+    # Guard the pathological case where suffixing collides with a literal name
+    # (e.g. a file holding both `TetO` x6 and a site actually called `TetO1`).
+    if len(set(out)) != len(out):
+        used = set()
+        for i, nm in enumerate(out):
+            cand, j = nm, 1
+            while cand in used:
+                cand, j = '{}_{}'.format(nm, j), j + 1
+            used.add(cand)
+            out[i] = cand
+    return out
+
+
+def is_teto_site(name, teto_prefix='TetO'):
+    """A site is 'privileged' (part of the synthetic array) iff its NAME starts with the
+    prefix, case-insensitively. Everything else -- TATA, BRE, Inr, ATF1, pause -- is a
+    discovered/annotated promoter footprint and is counted separately."""
+    return bool(teto_prefix) and name.lower().startswith(teto_prefix.lower())
+
+
+def paths_to_wide(paths, total_ll, read_ids, n_tfbs, site_names=None, teto_prefix='TetO'):
+    """
+    One row per molecule.
+
+    Columns, in order:
+      tfbs_{k}        legacy positional booleans, 1-based, UNCHANGED. Kept because
+                      common.py and the partition-function/lattice-gas fitters read them
+                      positionally or via `df.filter(like='tfbs_')`.
+      site_{name}     the same booleans keyed by stable site name (see tfbs_site_names).
+                      Deliberately a DIFFERENT prefix from `tfbs_` so it does not get
+                      swept up by existing `filter(like='tfbs_')` calls, which would
+                      otherwise double-count every site.
+      n_tf            all TF segments (legacy meaning: grows as the site inventory grows)
+      n_tf_teto       TF segments at array sites only  <-- use this for "num TetO bound"
+      n_tf_other      TF segments at named promoter sites
+      n_nuc / n_unid / nucs / unids / log_likelihood
+    """
+    if site_names is None:
+        site_names = ['site{}'.format(k + 1) for k in range(n_tfbs)]
+    teto_idx = {k for k, nm in enumerate(site_names) if is_teto_site(nm, teto_prefix)}
+
     rows = []
     for m, segs in enumerate(paths):
         tf_bound = set()
@@ -858,7 +1004,11 @@ def paths_to_wide(paths, total_ll, read_ids, n_tfbs):
         row = {'read_id': read_ids[m]}
         for k in range(n_tfbs):
             row['tfbs_{}'.format(k + 1)] = (k in tf_bound)
+        for k in range(n_tfbs):
+            row['site_{}'.format(site_names[k])] = (k in tf_bound)
         row['n_tf'] = len(tf_bound)
+        row['n_tf_teto'] = len(tf_bound & teto_idx)
+        row['n_tf_other'] = len(tf_bound - teto_idx)
         row['n_nuc'] = len(nucs)
         row['n_unid'] = len(unids)
         row['nucs'] = ';'.join('{}:{}:{:.0f}'.format(a, b, d) for (a, b, d) in nucs)
@@ -868,11 +1018,20 @@ def paths_to_wide(paths, total_ll, read_ids, n_tfbs):
     return pd.DataFrame(rows).set_index('read_id')
 
 
-def paths_to_tidy(paths, read_ids):
-    """Tidy long-format Viterbi path: one row per segment."""
+def paths_to_tidy(paths, read_ids, site_names=None):
+    """Tidy long-format Viterbi path: one row per segment.
+
+    `motif_name` resolves the TF anchor index to its stable site name (blank for
+    non-TF segments and for anchor-less TF), so the segments table can be filtered
+    on TetO-vs-promoter without joining back to the positions file.
+    """
     rows = []
     for m, segs in enumerate(paths):
         for i, (s, a, b, anchor) in enumerate(segs):
+            is_named_tf = (s == TF and anchor >= 0)
+            name = ''
+            if is_named_tf and site_names is not None and int(anchor) < len(site_names):
+                name = site_names[int(anchor)]
             rows.append({
                 'read_id': read_ids[m],
                 'seg_index': i,
@@ -881,9 +1040,23 @@ def paths_to_tidy(paths, read_ids):
                 'end': b,
                 # NUC always writes its dyad (may be <0 for an off-low-edge +1 nuc; see viterbi_decode
                 # 2026-07-20). TF writes its motif index only when it maps to one (anchor -1 = no motif).
-                'dyad_or_motif': (int(anchor) if (s == NUC or (s == TF and anchor >= 0)) else ''),
+                'dyad_or_motif': (int(anchor) if (s == NUC or is_named_tf) else ''),
+                'motif_name': name,
             })
     return pd.DataFrame(rows)
+
+
+def write_tfbs_index(path, amplicon_name, tfbs_positions, site_names, teto_prefix='TetO'):
+    """Sidecar mapping index -> (name, lo, hi, is_teto) so an existing `tfbs_{k}` file
+    stays interpretable after the positions file changes."""
+    with open(path, 'w') as fh:
+        fh.write('# tfbs index map for {}\n'.format(amplicon_name))
+        fh.write('# `index` is 1-based and matches the tfbs_{k} columns; it is NOT stable\n'
+                 '# across positions-file edits. `name` is. Key downstream code on `name`.\n')
+        fh.write('index\tname\tlo\thi\tis_teto\n')
+        for k, (t, nm) in enumerate(zip(tfbs_positions, site_names)):
+            fh.write('{}\t{}\t{}\t{}\t{}\n'.format(
+                k + 1, nm, int(t[0]), int(t[1]), is_teto_site(nm, teto_prefix)))
 
 
 # ---------------------------------------------------------------------------
@@ -1143,7 +1316,8 @@ def compute_classifications(mat, gpc_pos, tfbs_positions, params,
                             do_em=False, em_max_iters=8, em_min_obs=100, em_log_path=None,
                             em_fit_params=None, discover_mode='off',
                             fp_abs_floor=0.25, fp_rel_delta=0.20, fp_bg_window=80, fp_score_hi=1.0,
-                            precomputed_discovered=None):
+                            precomputed_discovered=None, teto_prefix='TetO',
+                            region_entry=None, promoter_thresh=0.5, promoter_min_bp=None):
     """
     mat: DataFrame (n_mol x n_gpc) with values in {1 protected, 0 accessible, -1 missing}.
     discover_mode: 'off'  = single decode, scalar UNID start cost (unchanged behavior);
@@ -1205,9 +1379,21 @@ def compute_classifications(mat, gpc_pos, tfbs_positions, params,
                                      discovered_footprints=discovered)
 
     read_ids = list(mat.index)
-    wide = paths_to_wide(paths, total_ll, read_ids, len(tfbs_positions))
-    tidy = paths_to_tidy(paths, read_ids)
-    diag = {'raw_frac': raw_frac, 'decon_frac': decon_frac, 'discovered': discovered}
+    site_names = tfbs_site_names(tfbs_positions)
+    wide = paths_to_wide(paths, total_ll, read_ids, len(tfbs_positions),
+                         site_names=site_names, teto_prefix=teto_prefix)
+    tidy = paths_to_tidy(paths, read_ids, site_names=site_names)
+
+    # Region-anchored per-molecule columns (tss_nuc, promoter_nuc_gt50, {region}_frac_{type}...).
+    # Computed by the SAME function the post-hoc annotator uses, fed the same tidy segments
+    # table, so inline and post-hoc numbers are identical by construction.
+    if region_entry is not None:
+        from annotate_molecule_regions import annotate_one
+        reg = annotate_one(tidy, region_entry, promoter_thresh, promoter_min_bp)
+        wide = wide.join(reg, how='left')
+
+    diag = {'raw_frac': raw_frac, 'decon_frac': decon_frac, 'discovered': discovered,
+            'site_names': site_names}
     return wide, tidy, paths, total_ll, params, diag
 
 
@@ -1231,6 +1417,30 @@ def main():
     p.add_argument('--output', required=True)
     p.add_argument('--segments_output', default=None,
                    help='Tidy long-format per-segment table (default: <output>.segments.txt)')
+    p.add_argument('--tfbs_index_output', default=None,
+                   help='Sidecar index->name/lo/hi map (default: <output>.tfbs_index.txt)')
+    p.add_argument('--teto_name_prefix', default='TetO',
+                   help='Positions-file sites whose NAME starts with this (case-insensitive) are '
+                        'counted in n_tf_teto; all others in n_tf_other. Set to "" to disable the '
+                        'split. Default: TetO')
+    p.add_argument('--regions', default=None,
+                   help='Optional region file from build_promoter_regions.py. If given, adds '
+                        'region-anchored per-molecule columns to the main output: tss_nuc, '
+                        'tss_footprint, tss_open, promoter_nuc_gt50 (+ nuc_bases_promoter / '
+                        'frac_nuc_promoter / promoter_len), and {region}_bases/frac/any_{type} '
+                        'for every region x segment type. Regions are matched by PROMOTER name '
+                        '(text before --amplicon_sep), so one 6xTetO entry covers every '
+                        'copy-number variant -- valid because the promoter block sits below the '
+                        'array start, which is fixed across the series.')
+    p.add_argument('--amplicon_sep', default='_opJS4_',
+                   help='Separator splitting promoter from amplicon name for --regions lookup')
+    p.add_argument('--promoter_nuc_thresh', type=float, default=0.5,
+                   help='Fraction of the promoter insert covered by NUC for promoter_nuc_gt50')
+    p.add_argument('--promoter_nuc_min_bp', type=int, default=None,
+                   help='Also emit an absolute-bp NUC threshold column. RECOMMENDED for '
+                        'cross-promoter comparisons: insert lengths are NOT uniform (264 bp for '
+                        'most opoBD9 promoters, RPS9 200, minCMV 59), so a fixed FRACTION means '
+                        'a different number of bases per promoter.')
     p.add_argument('--plot', required=True)
     p.add_argument('--positions', dest='positions_file', required=True)
     p.add_argument('--amplicon_name', required=True)
@@ -1279,6 +1489,22 @@ def main():
     p.add_argument('--tf_margin', type=int, default=2)
     p.add_argument('--unid_min', type=int, default=15)
     p.add_argument('--unid_max', type=int, default=90)
+    p.add_argument('--unid_may_overlap_motifs', action='store_true', default=True,
+                   help='allow a UNID segment to span a named positions-file motif. ON by default '
+                        'since 2026-08-12 (was OFF; --no_unid_may_overlap_motifs restores that). '
+                        'The named site still wins every tie automatically -- '
+                        'TF and UNID share prob_unmeth_given_* = 0.9, so a coincident UNID has an '
+                        'identical emission and costs 5 nats more -- so this does NOT let UNID steal '
+                        'named sites. What it enables is EXTENT REVISION: a footprint wider than the '
+                        'annotation can be called, at a cost of ~2.25 protected GpCs of extra '
+                        'evidence. TetO array sites stay exclusive unless --unid_overlap_teto.')
+    p.add_argument('--no_unid_may_overlap_motifs', dest='unid_may_overlap_motifs',
+                   action='store_false',
+                   help='restore the pre-2026-08-12 behavior: a UNID may not overlap ANY named motif. '
+                        'Needed to reproduce attempt2 / attempt3 JUNB-r3 / RPS9-r2 exactly.')
+    p.add_argument('--unid_overlap_teto', action='store_true',
+                   help='with --unid_may_overlap_motifs, also let UNID span TetO array sites. NOT '
+                        'recommended: a UNID straddling two operators muddies n_tf_teto.')
 
     # structural costs
     p.add_argument('--start_cost_open', type=float, default=0.5)
@@ -1342,6 +1568,34 @@ def main():
 
         pos_file = load_tfbs_positions(args.positions_file)
         tfbs_positions = pos_file.get(args.amplicon_name, [])
+        site_names = tfbs_site_names(tfbs_positions)
+        idx_out = args.tfbs_index_output or (args.output + '.tfbs_index.txt')
+        write_tfbs_index(idx_out, args.amplicon_name, tfbs_positions, site_names,
+                         args.teto_name_prefix)
+        n_teto = sum(is_teto_site(nm, args.teto_name_prefix) for nm in site_names)
+        print('{} site(s): {} TetO, {} other -> {}'.format(
+            len(site_names), n_teto, len(site_names) - n_teto, idx_out))
+
+        # Resolve the region entry once, up front, so a typo'd/absent promoter fails loudly
+        # here rather than silently producing an output with no region columns.
+        region_entry = None
+        if args.regions:
+            from annotate_molecule_regions import load_regions, build_region_lookup, promoter_of
+            all_regions = load_regions(args.regions)
+            region_entry = all_regions.get(args.amplicon_name)
+            if region_entry is None:
+                prom = promoter_of(args.amplicon_name, args.amplicon_sep)
+                region_entry = build_region_lookup(all_regions, args.amplicon_sep).get(prom)
+            if region_entry is None:
+                raise SystemExit(
+                    'ERROR: --regions {} has no entry for amplicon {} (promoter {}). Available '
+                    'promoters: {}'.format(args.regions, args.amplicon_name,
+                                           promoter_of(args.amplicon_name, args.amplicon_sep),
+                                           sorted({promoter_of(a, args.amplicon_sep)
+                                                   for a in all_regions})))
+            print('regions: {} window(s), tss_col={}, promoter=[{},{}]'.format(
+                len(region_entry['regions']), region_entry['tss'],
+                region_entry['prom_start'], region_entry['prom_end']))
 
         mat = filter_all_converted_reads(mat, args.filter_threshold)
 
@@ -1361,7 +1615,8 @@ def main():
             pd.DataFrame().to_csv(args.output, sep='\t')
             seg_out = args.segments_output or (args.output + '.segments.txt')
             pd.DataFrame(columns=['read_id', 'seg_index', 'type', 'start', 'end',
-                                  'dyad_or_motif']).to_csv(seg_out, sep='\t', index=False)
+                                  'dyad_or_motif', 'motif_name']).to_csv(seg_out, sep='\t',
+                                                                         index=False)
             return
 
         prom = list(map(int, args.promoter_positions.split(',')))
@@ -1388,6 +1643,9 @@ def main():
             nuc_min_prot_gpcs=args.nuc_min_prot_gpcs,
             tf_margin=args.tf_margin,
             unid_min=args.unid_min, unid_max=args.unid_max,
+            unid_may_overlap_motifs=args.unid_may_overlap_motifs,
+            unid_overlap_teto=args.unid_overlap_teto,
+            teto_name_prefix=args.teto_name_prefix,
             start_cost_open=args.start_cost_open, start_cost_nuc=args.start_cost_nuc,
             start_cost_tf=args.start_cost_tf, start_cost_unid=args.start_cost_unid,
             unid_discovered_start_cost=args.unid_discovered_start_cost,
@@ -1397,6 +1655,11 @@ def main():
 
         print('decoding {} molecules ({} TFBS motifs, grid_step={})'.format(
             len(mat), len(tfbs_positions), params.grid_step))
+        # decode-affecting and easy to forget which way a round was run -- say it in the log
+        _nblock = len(unid_blocked_intervals(tfbs_positions, params.tf_margin, params))
+        print('UNID/motif exclusivity: may_overlap={} overlap_teto={} -> {}/{} motifs block UNID'
+              .format(params.unid_may_overlap_motifs, params.unid_overlap_teto,
+                      _nblock, len(tfbs_positions)))
         em_log_path = args.em_log or (args.output + '.em_log.tsv')
         em_fit_params = [s.strip() for s in args.em_fit.split(',')] if args.em_fit else None
         precomputed = None
@@ -1411,7 +1674,9 @@ def main():
             em_log_path=(em_log_path if args.do_em else None), em_fit_params=em_fit_params,
             discover_mode=args.discover_footprints, fp_abs_floor=args.footprint_abs_floor,
             fp_rel_delta=args.footprint_rel_delta, fp_bg_window=args.footprint_bg_window,
-            fp_score_hi=args.footprint_score_hi, precomputed_discovered=precomputed)
+            fp_score_hi=args.footprint_score_hi, precomputed_discovered=precomputed,
+            teto_prefix=args.teto_name_prefix, region_entry=region_entry,
+            promoter_thresh=args.promoter_nuc_thresh, promoter_min_bp=args.promoter_nuc_min_bp)
 
         wide.to_csv(args.output, sep='\t', header=True, index=True)
         seg_out = args.segments_output or (args.output + '.segments.txt')

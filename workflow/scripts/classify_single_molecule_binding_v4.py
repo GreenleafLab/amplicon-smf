@@ -60,10 +60,19 @@ from common import (
 @dataclass
 class ModelParams:
     amp_width: int
+    # nuc_length is now ONLY the reported/output window (nuc_start/nuc_end columns). It no longer
+    # controls dyad spacing (see nuc_min_spacing) or the protection footprint (see nuc_d_edge).
     nuc_length: int = 140
+    # Minimum dyad-to-dyad spacing = the physical nucleosome "core" that cannot overlap. Governs
+    # state enumeration (recursive_1_placer), the non-overlap sanity check, and TF/nuc pruning.
+    # Decoupled from nuc_length so the protection footprint can be wider than the core (Option A).
+    nuc_min_spacing: int = 130
     bin_size: int = 10
     p_t_given_unmeth: float = 0.95
     p_t_given_meth: float = 0.15
+    # Protection footprint (logistic in distance-from-dyad). Reverted to the original ~130 bp span:
+    # the TF-boundary penalty below now handles spurious TFs directly, so the wide footprint is no
+    # longer needed (and the narrow one restores normal-nucleosome fit).
     nuc_d_edge: float = 65.0
     nuc_softness: float = 5.0
     prob_unmeth_given_tf: float = 0.9
@@ -71,14 +80,32 @@ class ModelParams:
     promoter_lo: int = 0
     promoter_hi: int = 0
     prob_unmeth_given_open_promoter: float = 0.5
+    # Rounding (decimal places) for the p_U signature used to collapse observationally-equivalent
+    # microstates. Coarser => more aggressive merging (biased toward the parsimonious representative).
+    collapse_p_u_decimals: int = 2
+    # --- TF-boundary penalty (encodes "a real TF is a punctate protected blob bounded by accessible
+    # GpCs on both OUTER sides of its run") ---
+    # A protected GpC in a TF run's outward flank zone is penalized, distance-weighted: 0 within
+    # tf_flank_breath bp (TF breathing / a too-close flanking GpC that reads protected is tolerated),
+    # ramping to tf_flank_lambda by tf_flank_dist bp. Inter-TF gaps within a run are exempt.
+    tf_flank_breath: float = 10.0
+    tf_flank_dist: float = 35.0
+    tf_flank_lambda: float = 3.0
+    # Occam cap: contiguous TF runs longer than max_tf_run look like a nucleosome, so each site
+    # beyond the cap adds tf_run_lambda (default to nuc for long protected runs).
+    max_tf_run: int = 3
+    tf_run_lambda: float = 3.0
 
 
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
 
-def auto_detect_amp_width(methyl_positions, nuc_length):
-    return int(max(methyl_positions)) + nuc_length // 2 + 10
+def auto_detect_amp_width(methyl_positions, nuc_length, nuc_d_edge=0.0):
+    # Pad past the last GpC by the larger of half the reported window or the protection footprint
+    # (d_edge), so a "ghost" dyad can sit beyond the last observed base and still protect it.
+    pad = max(nuc_length // 2, int(nuc_d_edge)) + 10
+    return int(max(methyl_positions)) + pad
 
 
 def get_nuc_start_and_end_from_midpoint(bin_idx, bin_size, nuc_length):
@@ -105,12 +132,15 @@ def recursive_1_placer(lst, spacing, start_idx):
     return to_return
 
 
-def enumerate_nucleosomal_states(amp_width, nuc_length, bin_size):
+def enumerate_nucleosomal_states(amp_width, nuc_min_spacing, bin_size):
     """
     Puts nucleosome midpoints (1s) into an array of bins.
     Returns a DataFrame where each row is a valid nucleosome placement state.
+    Spacing between dyads is governed by nuc_min_spacing (the physical core that cannot
+    overlap), NOT by the protection footprint -- so a wide/soft footprint does not force
+    dyads farther apart.
     """
-    nuc_bin_width = nuc_length // bin_size
+    nuc_bin_width = nuc_min_spacing // bin_size
     input_lst = [0 for _ in range(amp_width // bin_size)]
     nucs = recursive_1_placer(input_lst, nuc_bin_width, 0)
     return pd.DataFrame(nucs, columns=list(range(len(input_lst))))
@@ -133,15 +163,17 @@ def enumerate_tf_states(tfbs_positions):
     )
 
 
-def construct_nuc_occupancy_matrix(nuc_states, amp_width, nuc_length, bin_size):
+def construct_nuc_occupancy_matrix(nuc_states, amp_width, nuc_core_len, bin_size):
     """
-    (n_states, amp_width) int8 matrix: 1 where any bound nuc covers that base.
+    (n_states, amp_width) int8 matrix: 1 where any bound nuc's CORE covers that base.
+    Uses the physical core length (nuc_min_spacing), not the protection footprint, since this
+    matrix drives nuc-nuc non-overlap and TF-nuc pruning (both physical-occupancy questions).
     Processed bin-by-bin to stay within O(n_states * amp_width) memory.
     """
     n_states = len(nuc_states)
     mat = np.zeros((n_states, amp_width), dtype=np.int8)
     for k in range(len(nuc_states.columns)):
-        start, end = get_nuc_start_and_end_from_midpoint(k, bin_size, nuc_length)
+        start, end = get_nuc_start_and_end_from_midpoint(k, bin_size, nuc_core_len)
         start, end = max(0, start), min(amp_width, end)
         if end > start:
             occupied = nuc_states.values[:, k].astype(np.int8)
@@ -163,13 +195,14 @@ def construct_tf_occupancy_matrix(tf_states, tfbs_positions, amp_width):
     return mat
 
 
-def prune_states(tf_states, nuc_states, tfbs_positions, amp_width, nuc_length, bin_size):
+def prune_states(tf_states, nuc_states, tfbs_positions, amp_width, nuc_core_len, bin_size):
     """
     Returns paired (tf_states, nuc_states) DataFrames of valid microstates,
     where row i of both DataFrames jointly describes microstate i.
-    Uses vectorized matmul overlap check.
+    Uses vectorized matmul overlap check on the physical nucleosome core (nuc_core_len =
+    nuc_min_spacing), so a bound TF is excluded only where it would sit inside a core.
     """
-    nuc_mat = construct_nuc_occupancy_matrix(nuc_states, amp_width, nuc_length, bin_size)
+    nuc_mat = construct_nuc_occupancy_matrix(nuc_states, amp_width, nuc_core_len, bin_size)
     tf_mat = construct_tf_occupancy_matrix(tf_states, tfbs_positions, amp_width)
     # overlap[i,j] > 0 means tf state i and nuc state j conflict
     overlap = (tf_mat.astype(np.int32) @ nuc_mat.astype(np.int32).T) > 0
@@ -187,8 +220,10 @@ def prune_states(tf_states, nuc_states, tfbs_positions, amp_width, nuc_length, b
     return valid_tf, valid_nuc
 
 
-def check_nuc_state_sanity(nuc_states, bin_size, nuc_length, n_sample=200):
-    """Assert no two occupied nuc bins overlap in any sampled state."""
+def check_nuc_state_sanity(nuc_states, bin_size, nuc_core_len, n_sample=200):
+    """Assert no two occupied nuc CORES overlap in any sampled state. Uses nuc_core_len
+    (= nuc_min_spacing), consistent with the enumeration spacing; the protection footprint
+    (which is wider and MAY overlap between adjacent nucs) is intentionally not checked here."""
     import random
     indices = list(range(min(100, len(nuc_states))))
     if len(nuc_states) > 100:
@@ -199,7 +234,7 @@ def check_nuc_state_sanity(nuc_states, bin_size, nuc_length, n_sample=200):
     for idx in indices:
         state = nuc_states.iloc[idx]
         occupied = [k for k in state.index if state[k] > 0]
-        windows = [get_nuc_start_and_end_from_midpoint(k, bin_size, nuc_length) for k in occupied]
+        windows = [get_nuc_start_and_end_from_midpoint(k, bin_size, nuc_core_len) for k in occupied]
         for i in range(len(windows)):
             for j in range(i + 1, len(windows)):
                 s1, e1 = windows[i]
@@ -289,6 +324,99 @@ def build_log_prob_matrices(nuc_states, tf_states, methyl_positions, tfbs_positi
     return log_prob_t, log_prob_c
 
 
+def collapse_equivalent_states(nuc_states, tf_states, methyl_positions, tfbs_positions, params):
+    """
+    Collapse observationally-equivalent microstates and keep the most parsimonious representative.
+
+    Two microstates are indistinguishable given the data if they predict the same protection
+    probability p_U at every OBSERVED GpC -- no molecule's likelihood could tell them apart, so
+    keeping both just lets the classifier pick arbitrarily (this is what produces "slid nucleosome"
+    duplicates and spurious TFs tucked under a nucleosome's footprint). Because p_U is a continuous
+    logistic of distance, exact equality almost never holds, so we compare a QUANTIZED signature
+    (rounded to params.collapse_p_u_decimals). Among states sharing a signature we keep the one with
+    the fewest bound features -- fewest TFs first, then fewest nucleosomes.
+
+    Returns paired (nuc_states, tf_states) with the row-alignment invariant preserved.
+    """
+    nuc_prot = build_nuc_protection_matrix(nuc_states, methyl_positions, params)
+    tf_prot = build_tf_protection_matrix(
+        tf_states, methyl_positions, tfbs_positions, params.prob_unmeth_given_tf
+    )
+    open_prot = build_open_protection_array(methyl_positions, params)
+    p_u = np.maximum(np.maximum(nuc_prot, tf_prot), open_prot[np.newaxis, :])  # (n_states, n_gpcs)
+    sig = np.round(p_u, params.collapse_p_u_decimals)
+
+    n_tf = tf_states.values.sum(axis=1)
+    n_nuc = nuc_states.values.sum(axis=1)
+
+    # keep[signature] = (row_index, (n_tf, n_nuc)); tuple compare => fewest TFs, then fewest nucs
+    keep = {}
+    for i in range(sig.shape[0]):
+        key = sig[i].tobytes()
+        cand = (int(n_tf[i]), int(n_nuc[i]))
+        if key not in keep or cand < keep[key][1]:
+            keep[key] = (i, cand)
+
+    kept_idx = sorted(v[0] for v in keep.values())
+    nuc_kept = nuc_states.iloc[kept_idx].reset_index(drop=True)
+    tf_kept = tf_states.iloc[kept_idx].reset_index(drop=True)
+    return nuc_kept, tf_kept
+
+
+def build_tf_boundary_penalty(tf_states, methyl_positions, tfbs_positions, params):
+    """
+    Precompute the TF-boundary penalty pieces (see ModelParams.tf_flank_*). Encodes that a real
+    TF is a punctate protected footprint bounded by ACCESSIBLE GpCs on both OUTER sides of its
+    contiguous run -- a protected outward flank (e.g. an adjacent nucleosome extending in, or a
+    run that is really a nucleosome) is penalized. Distance-weighted so a too-close flanking GpC
+    that reads protected (TF breathing) is tolerated. Inter-TF gaps within a run are exempt; only
+    the outer edges of each maximal run of consecutive bound TFs are checked.
+
+    Returns a dict consumed by classify_all_molecules. Kept factored (not a dense (n_states,n_gpcs)
+    matrix) so the penalty is applied per chunk as small matmuls:
+        penalty(state, mol) = edgeL @ (wL @ protected) + edgeR @ (wR @ protected) + run_penalty
+      edgeL/edgeR : (n_states, n_tf) indicators of run left/right outer-edge TFs
+      wL/wR       : (n_tf, n_gpcs) distance-ramped weights for each TF's outward flank GpCs
+      run_penalty : (n_states,) Occam penalty for runs longer than max_tf_run
+    """
+    methyl_arr = np.asarray(methyl_positions, dtype=float)
+    n_tf = len(tfbs_positions)
+    n_gpcs = len(methyl_positions)
+    tf_vals = tf_states.values.astype(bool)                 # (n_states, n_tf)
+
+    breath, dmax, lam = params.tf_flank_breath, params.tf_flank_dist, params.tf_flank_lambda
+    denom = max(dmax - breath, 1e-9)
+    wL = np.zeros((n_tf, n_gpcs))
+    wR = np.zeros((n_tf, n_gpcs))
+    for k, tfbs in enumerate(tfbs_positions):
+        s = int(tfbs[0]) - 2
+        e = int(tfbs[1]) + 2
+        dl = s - methyl_arr                                 # >0 for GpCs left of the footprint
+        mL = (dl > 0) & (dl <= dmax)
+        wL[k, mL] = lam * np.clip((dl[mL] - breath) / denom, 0.0, 1.0)
+        dr = methyl_arr - e                                 # >0 for GpCs right of the footprint
+        mR = (dr > 0) & (dr <= dmax)
+        wR[k, mR] = lam * np.clip((dr[mR] - breath) / denom, 0.0, 1.0)
+
+    # Run outer-edge indicators: TF k is a run's LEFT edge if bound and its left neighbor is not
+    prev = np.zeros_like(tf_vals); prev[:, 1:] = tf_vals[:, :-1]
+    nxt = np.zeros_like(tf_vals);  nxt[:, :-1] = tf_vals[:, 1:]
+    edgeL = (tf_vals & ~prev).astype(float)                 # (n_states, n_tf)
+    edgeR = (tf_vals & ~nxt).astype(float)
+
+    # Occam run-length penalty: each bound site beyond max_tf_run in a contiguous run adds tf_run_lambda
+    cap = params.max_tf_run
+    run_lam = params.tf_run_lambda
+    run_len = np.zeros(tf_vals.shape[0])
+    run_penalty = np.zeros(tf_vals.shape[0])
+    for k in range(n_tf):
+        col = tf_vals[:, k].astype(float)
+        run_len = col * (run_len + 1.0)                     # 0 where unbound, else prior run + 1
+        run_penalty += np.where(run_len > cap, run_lam, 0.0)
+
+    return {'edgeL': edgeL, 'edgeR': edgeR, 'wL': wL, 'wR': wR, 'run_penalty': run_penalty}
+
+
 # ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
@@ -298,12 +426,15 @@ def determine_chunk_size(n_mols, n_states, memory_threshold_gb):
     return max(1, math.ceil(n_mols * n_states * 8 / (memory_threshold_gb * 1e9)))
 
 
-def classify_all_molecules(single_molecules, log_prob_t, log_prob_c, n_chunks):
+def classify_all_molecules(single_molecules, log_prob_t, log_prob_c, n_chunks, tf_boundary=None):
     """
     Chunked matmul: log_prob_t @ sub_mat + log_prob_c @ (1 - sub_mat) gives score
     matrix (n_states x chunk_size). Argmax per column = MLE state. Also return
     per-molecule log-likelihood = score of the assigned state.
     single_molecules: (n_gpcs, n_mols).
+    tf_boundary: optional dict from build_tf_boundary_penalty; subtracts the distance-ramped
+    TF-flank penalty (on protected observations at TF-run outer edges) plus the run-length
+    Occam penalty from each state's score.
     """
     n_mols = single_molecules.shape[1]
     chunk_size = (n_mols + n_chunks - 1) // n_chunks
@@ -314,6 +445,11 @@ def classify_all_molecules(single_molecules, log_prob_t, log_prob_c, n_chunks):
         if sub.shape[1] == 0:
             continue
         scores = log_prob_t @ sub + log_prob_c @ (1.0 - sub)  # (n_states, chunk)
+        if tf_boundary is not None:
+            # protected observations at TF-run outer flanks, distance-weighted, + run-length Occam
+            flank = (tf_boundary['edgeL'] @ (tf_boundary['wL'] @ sub)
+                     + tf_boundary['edgeR'] @ (tf_boundary['wR'] @ sub))
+            scores = scores - flank - tf_boundary['run_penalty'][:, np.newaxis]
         best = np.argmax(scores, axis=0)
         lls = scores[best, np.arange(sub.shape[1])]
         assignments.extend(best.tolist())
@@ -400,8 +536,9 @@ def run_em_mstep(single_molecules, assignments, tf_states, nuc_states,
 
     tf_gpc_mask = _build_tf_gpc_mask(methyl_positions, tfbs_positions)       # (n_tfs, n_gpcs)
     nuc_coverage = _build_nuc_binary_coverage(
-        nuc_states, methyl_positions, params.bin_size, params.nuc_length
-    )   # (n_states, n_gpcs)
+        nuc_states, methyl_positions, params.bin_size, int(2 * params.nuc_d_edge)
+    )   # (n_states, n_gpcs); use protection footprint (~2*d_edge), not the report window,
+        # so footprint-covered GpCs aren't miscounted as "open" when estimating prob_unmeth_given_open
     dist_to_nuc = _build_distance_to_nearest_nuc(
         nuc_states, methyl_positions, params.bin_size
     )   # (n_states, n_gpcs)
@@ -460,7 +597,7 @@ def run_em_mstep(single_molecules, assignments, tf_states, nuc_states,
             nll,
             [params.nuc_d_edge, params.nuc_softness],
             method='L-BFGS-B',
-            bounds=[(20.0, 90.0), (1.0, 30.0)]
+            bounds=[(20.0, 110.0), (1.0, 30.0)]   # d_edge upper raised for the wider Option-A footprint
         )
         if res.success or res.fun < nll([params.nuc_d_edge, params.nuc_softness]):
             est_d_edge, est_softness = float(res.x[0]), float(res.x[1])
@@ -545,24 +682,35 @@ def compute_classifications(single_molecules, methyl_positions, tfbs_positions, 
     else:
         print('enumerating states')
         raw_tf = enumerate_tf_states(tfbs_positions)
-        raw_nuc = enumerate_nucleosomal_states(params.amp_width, params.nuc_length, params.bin_size)
+        raw_nuc = enumerate_nucleosomal_states(params.amp_width, params.nuc_min_spacing, params.bin_size)
         print(f'  raw tf states: {len(raw_tf)}, raw nuc states: {len(raw_nuc)}')
         tf_states, nuc_states = prune_states(
             raw_tf, raw_nuc, tfbs_positions,
-            params.amp_width, params.nuc_length, params.bin_size
+            params.amp_width, params.nuc_min_spacing, params.bin_size
         )
+        print(f'  valid (non-overlapping) states: {len(tf_states)}')
+        # Collapse observationally-equivalent microstates (Option A) -> keep parsimonious rep.
+        n_before = len(tf_states)
+        nuc_states, tf_states = collapse_equivalent_states(
+            nuc_states, tf_states, methyl_positions, tfbs_positions, params
+        )
+        print(f'  collapsed {n_before} -> {len(tf_states)} identifiable states '
+              f'(p_U rounded to {params.collapse_p_u_decimals} dp)')
         if precomputed_states_file:
             with open(precomputed_states_file, 'wb') as fh:
                 pickle.dump((tf_states, nuc_states), fh)
             print(f'  saved states to {precomputed_states_file}')
 
     print(f'valid states: {len(tf_states)}')
-    check_nuc_state_sanity(nuc_states, params.bin_size, params.nuc_length)
+    check_nuc_state_sanity(nuc_states, params.bin_size, params.nuc_min_spacing)
 
     n_states = len(tf_states)
     n_mols = single_molecules.shape[1]
     n_chunks = determine_chunk_size(n_mols, n_states, memory_threshold)
     print(f'n_chunks: {n_chunks}')
+
+    # TF-boundary penalty pieces (state-only; independent of EM-fitted params, so build once)
+    tf_boundary = build_tf_boundary_penalty(tf_states, methyl_positions, tfbs_positions, params)
 
     # --- EM or single-pass ---
     em_log_rows = []
@@ -576,7 +724,7 @@ def compute_classifications(single_molecules, methyl_positions, tfbs_positions, 
                 nuc_states, tf_states, methyl_positions, tfbs_positions, current_params
             )
             assignments, log_likelihoods = classify_all_molecules(
-                single_molecules, log_prob_t, log_prob_c, n_chunks
+                single_molecules, log_prob_t, log_prob_c, n_chunks, tf_boundary=tf_boundary
             )
 
             estimates, n_obs = run_em_mstep(
@@ -641,7 +789,7 @@ def compute_classifications(single_molecules, methyl_positions, tfbs_positions, 
             nuc_states, tf_states, methyl_positions, tfbs_positions, current_params
         )
         assignments, log_likelihoods = classify_all_molecules(
-            single_molecules, log_prob_t, log_prob_c, n_chunks
+            single_molecules, log_prob_t, log_prob_c, n_chunks, tf_boundary=tf_boundary
         )
 
     else:
@@ -650,7 +798,7 @@ def compute_classifications(single_molecules, methyl_positions, tfbs_positions, 
             nuc_states, tf_states, methyl_positions, tfbs_positions, params
         )
         assignments, log_likelihoods = classify_all_molecules(
-            single_molecules, log_prob_t, log_prob_c, n_chunks
+            single_molecules, log_prob_t, log_prob_c, n_chunks, tf_boundary=tf_boundary
         )
 
     # Write EM log (never to cwd; only if path provided)
@@ -721,7 +869,12 @@ if __name__ == '__main__':
     # Amplicon constants
     parser.add_argument('--amp_width', type=int, default=None,
                         help='Amplicon width in bp (default: auto-detect from methyl_positions)')
-    parser.add_argument('--nuc_length', type=int, default=140)
+    parser.add_argument('--nuc_length', type=int, default=140,
+                        help='Reported nucleosome window (nuc_start/nuc_end output only); does NOT '
+                             'set spacing or protection footprint')
+    parser.add_argument('--nuc_min_spacing', type=int, default=130,
+                        help='Minimum dyad-dyad spacing = physical core that cannot overlap '
+                             '(state enumeration + non-overlap + TF/nuc pruning)')
     parser.add_argument('--bin_size', type=int, default=10)
 
     # Conversion params
@@ -729,8 +882,25 @@ if __name__ == '__main__':
     parser.add_argument('--p_t_given_meth', type=float, default=0.15)
 
     # Protection params
-    parser.add_argument('--nuc_d_edge', type=float, default=65.0)
-    parser.add_argument('--nuc_softness', type=float, default=5.0)
+    parser.add_argument('--nuc_d_edge', type=float, default=65.0,
+                        help='Nucleosome protection half-max distance from dyad (~half the footprint)')
+    parser.add_argument('--nuc_softness', type=float, default=5.0,
+                        help='Logistic softness of the nucleosome protection edge (larger = softer)')
+    parser.add_argument('--collapse_p_u_decimals', type=int, default=2,
+                        help='Decimal places for the p_U signature used to collapse '
+                             'observationally-equivalent states (coarser = more merging)')
+
+    # TF-boundary penalty (a real TF is a punctate blob bounded by accessible GpCs on both sides)
+    parser.add_argument('--tf_flank_breath', type=float, default=10.0,
+                        help='bp of protected TF flank tolerated (TF breathing / too-close GpC)')
+    parser.add_argument('--tf_flank_dist', type=float, default=35.0,
+                        help='bp out to which accessibility is expected at a TF run edge (penalty ramps to full here)')
+    parser.add_argument('--tf_flank_lambda', type=float, default=3.0,
+                        help='max penalty for a fully-protected TF flank (calibrate via +/- TF nuc-length analysis)')
+    parser.add_argument('--max_tf_run', type=int, default=3,
+                        help='contiguous TF run length beyond which Occam defaults to a nucleosome')
+    parser.add_argument('--tf_run_lambda', type=float, default=3.0,
+                        help='penalty per bound TF beyond max_tf_run in a contiguous run')
     parser.add_argument('--prob_unmeth_given_tf', type=float, default=0.9)
     parser.add_argument('--prob_unmeth_given_open', type=float, default=0.05)
     parser.add_argument('--promoter_positions', type=str, default='0,0',
@@ -785,12 +955,13 @@ if __name__ == '__main__':
         # Determine amp_width
         amp_width = args.amp_width
         if amp_width is None:
-            amp_width = auto_detect_amp_width(methyl_positions, args.nuc_length)
+            amp_width = auto_detect_amp_width(methyl_positions, args.nuc_length, args.nuc_d_edge)
             print(f'auto-detected amp_width: {amp_width}')
 
         params = ModelParams(
             amp_width=amp_width,
             nuc_length=args.nuc_length,
+            nuc_min_spacing=args.nuc_min_spacing,
             bin_size=args.bin_size,
             p_t_given_unmeth=args.p_t_given_unmeth,
             p_t_given_meth=args.p_t_given_meth,
@@ -801,6 +972,12 @@ if __name__ == '__main__':
             promoter_lo=promoter_lo,
             promoter_hi=promoter_hi,
             prob_unmeth_given_open_promoter=args.prob_unmeth_given_open_promoter,
+            collapse_p_u_decimals=args.collapse_p_u_decimals,
+            tf_flank_breath=args.tf_flank_breath,
+            tf_flank_dist=args.tf_flank_dist,
+            tf_flank_lambda=args.tf_flank_lambda,
+            max_tf_run=args.max_tf_run,
+            tf_run_lambda=args.tf_run_lambda,
         )
 
         single_molecules = mat.T.values

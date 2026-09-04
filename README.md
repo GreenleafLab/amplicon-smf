@@ -160,7 +160,74 @@ diagnostic pages at the front of the PDF before trusting any per-molecule call.
 
 In amplicon-smf/workflow/scripts/ there are some other helpful downstream plotting files, although not a ton. As the project evolved the needs changed. I'm not gonna document them all here, but the titles are pretty informative. But basically they all just involved loading a matrix into pandas and doing plotting, so...
 
+### Region-anchored per-molecule columns (`tss_nuc`, `promoter_nuc_gt50`, …)
+The v5 classifier's per-molecule output is coordinate-free — counts (`n_nuc`) and raw intervals
+(`nucs`). Nothing in it knows what a TSS or a promoter *is*. **Region-anchored** columns come from
+intersecting those intervals with the named windows in a region file from `build_promoter_regions.py`
+(`core_PIC`, `TSS_Inr`, `pause`, `plus1_nuc`, `TATA`, `promoter`).
+
+> **`plus1_nuc` is in ABSOLUTE construct coordinates** (`[0, prom_start-1]`, identical for every
+> promoter), not TSS-relative — changed 2026-08-04. Measured across 16 promoters, this nucleosome's
+> interior boundary is pinned to absolute column ~115 (sd 10) but scatters in TSS coordinates (sd 24):
+> it's positioned by the constant downstream backbone, not by the TSS. The name is kept for continuity
+> with existing analyses. Details and the impact assessment: `NOTES_v5_hsmm_status.md`.
+
+Two ways to get them, computing **identical numbers** (both call
+`annotate_molecule_regions.annotate_one()` on the same tidy segments table — verified column-for-column
+on 681 molecules):
+- **Inline**, if you're re-running the classifier anyway: add `--regions <region file>` to
+  `classify_single_molecule_binding_v5_hsmm.py`. Columns land in the main per-molecule file.
+- **Post-hoc**, against segments files already on disk (no re-decode):
+  `python workflow/scripts/annotate_molecule_regions.py --regions <region file> --model_dir <dir of {sample}/{sample}.{amplicon}.segments*.txt> --positions <positions file> --output molecule_regions.txt.gz`
+
+Headline columns: `tss_nuc` (a NUC segment covers the TSS column itself), `tss_footprint` (UNID/TF
+over it), `tss_open` (neither — the three are mutually exclusive and exhaustive), and
+`promoter_nuc_gt50` (>50% of the promoter insert covered by NUC), plus `{region}_bases_{type}` /
+`_frac_` / `_any_` for every region × segment type. Regions are matched by **promoter name**, so the
+one `_opJS4_6xTetO` entry covers every copy-number variant — valid because the TetO array starts at a
+fixed low coordinate (JUNB 481, RPS9 417) and grows upward, leaving the promoter block identical
+across the series.
+
+> **Caveat — `promoter_nuc_gt50` is not comparable across promoters of different length.** Promoter
+> insert lengths are not uniform (264 bp for most opoBD9 promoters, RPS9 200, **minCMV 59**). At 59 bp
+> "50% covered" is 30 bp, which almost any nucleosome grazing the block satisfies; at 264 bp it's
+> 132 bp, roughly a whole nucleosome. Always carry `nuc_bases_promoter` / `promoter_len` alongside the
+> boolean, and use `--promoter_nuc_min_bp` for an absolute-bp column when comparing across promoters.
+
+### Protection-streak histogram (nuc-TF adjacency control)
+`protection_streak_histogram.py` is a **model-free** control for a key modeling question: when the
+binding classifier places a TF *adjacent* to a nucleosome (contiguous protection, no accessible base
+between them), is that real biology or a classifier artifact? It takes the single-molecule matrices
+of two samples at the **same amplicon** — one that CAN bind the TF (e.g. +dox, has TetO) and one that
+ABSOLUTELY CANNOT (e.g. 0xTetO or no-dox) — computes contiguous protection streak lengths per molecule
+straight from the raw matrix, and overlays the two distributions (with a KS test).
+
+`python workflow/scripts/protection_streak_histogram.py --matrix_can_bind /path/[samp_TF].[amp].dedup.full_unclustered.matrix --matrix_cannot_bind /path/[samp_noTF].[amp].dedup.full_unclustered.matrix --label_can "+dox 6xTetO" --label_cannot "0xTetO" --mode longest --region 260,520 --output streaks.pdf --stats_output streaks.stats.txt`
+
+**Interpretation:** a rightward shift / larger long-streak fraction in the TF-capable sample means the
+long protected stretches are TF-dependent — i.e. nuc-TF adjacency is **real** and a classifier that
+penalizes it would be discarding real signal. Matching distributions mean the long streaks are not
+TF-driven (pure nucleosomes) and an adjacency penalty is justified. This gates whether the v4
+"TF-boundary penalty" work (branch `v4-nuc-model-updates`) is kept or rolled back. Self-contained
+(no repo imports) so it can be run in any directory. Design notes / full reasoning:
+`workflow/scripts/NOTES_v4_nuc_model_changes.md`.
+
 ## To Do
 - Reparallelize the bwameth step!
 - Fix off by one error in matrix file generation (first base in reference is chopped off in matrix files). Likely problem is in convert_amplicon_fa_to_peaklist.py where start base is indicated as 1 but in python things are 0 indexed. So change this to a 0 and try, but this will cause downstream issues because of patchwork done in model, etc. around this indexing problem so wait until we can fix entire issue before touching this).
 - Collate stats from the individual experiments and paste them in a table together.
+
+## v5 footprint model, Ising partition function, and potency
+
+The v5 HSMM classifier and the downstream Ising / potency analyses have their own end-to-end
+recipe, including how to port them to a new TF or promoter:
+
+**`workflow/scripts/HOWTO_v5_ising_potency.md`**
+
+Key scripts:
+- `classify_single_molecule_binding_v5_hsmm.py` — per-molecule footprint decode (OPEN/NUC/TF/UNID)
+- `fit_ising_model.py` — equilibrium array model (`h`, `J`, `mu`, `delta`); `selftest` subcommand
+- `fit_two_timescale_potency.py` — potency `k_pot` and its instantaneous/integrated split `w`
+
+Validated by reproducing Nature 2024 Fig. 3 from the original FASTQs; see the HOWTO for the
+comparison table and the reference run directory.
