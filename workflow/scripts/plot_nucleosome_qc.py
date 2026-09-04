@@ -48,7 +48,15 @@ def get_all_protection_streaks(methyls, positions):
 
     return sorted(streaks,key=lambda x: x[0],reverse=True)
 
+# GaussianMixture(n_components=2) requires n_samples >= n_components, and a 2-molecule
+# fit is as meaningless as a 1-molecule one. Amplicons that pick up a stray read or two
+# (index hopping onto a contig essentially absent from the library) would otherwise crash
+# the whole rule -- see the plot_nuc_qc section of the project CLAUDE.md.
+MIN_MOLECULES_FOR_GMM = 10
+
 def fit_gmm_to_hist(data):
+    if len(data) < MIN_MOLECULES_FOR_GMM:
+        return None
     gm = GaussianMixture(n_components=2, random_state=0).fit(np.array(data).reshape(-1, 1))
     return gm
     
@@ -123,10 +131,11 @@ def plot_nucleosome_qc(input_prefix, amplicon_fa, plots, results, fit_gmm):
     gmm = fit_gmm_to_hist(data)
     plot_nuc_len_histogram(data, plots, title='All_Amplicons', gmm=gmm if fit_gmm else None)
 
-    # write results
-    results.write('{}\t{:.0f}\n'.format('nuc_lower_mean_all', sorted(gmm.means_.flatten())[0]))
-    results.write('{}\t{:.0f}\n'.format('nuc_upper_mean_all', sorted(gmm.means_.flatten())[1]))
-    results.write('{}\t{:.2f}\n'.format('nuc_frac_in_lower_mode_all', np.mean(gmm.predict(np.array(data).reshape(-1, 1))==(0 if gmm.means_.flatten()[0] < gmm.means_.flatten()[1] else 1))))
+    # write results (gmm is None when there were too few molecules to fit)
+    if gmm is not None:
+        results.write('{}\t{:.0f}\n'.format('nuc_lower_mean_all', sorted(gmm.means_.flatten())[0]))
+        results.write('{}\t{:.0f}\n'.format('nuc_upper_mean_all', sorted(gmm.means_.flatten())[1]))
+        results.write('{}\t{:.2f}\n'.format('nuc_frac_in_lower_mode_all', np.mean(gmm.predict(np.array(data).reshape(-1, 1))==(0 if gmm.means_.flatten()[0] < gmm.means_.flatten()[1] else 1))))
 
     # do no tfbs
     no_tfbs = ['opJS4_0x_TetO_21bp_no_CG', 'opJS5_0xTetO_18bp_b1', 'opJS5_0xTetO_18bp_b2', 'BD24', 'no_TFBS', 'background']
@@ -135,9 +144,13 @@ def plot_nucleosome_qc(input_prefix, amplicon_fa, plots, results, fit_gmm):
     for amplicon in no_tfbs:
         if amplicon in amplicon_to_nuc_len_dict:
             data = amplicon_to_nuc_len_dict[amplicon]
+            if not data:
+                continue
             gmm = fit_gmm_to_hist(data)
             plot_nuc_len_histogram(data, plots, title=amplicon, gmm=gmm if fit_gmm else None)
-            if len(data) > reads:
+            # `gmm is not None` must be checked here too: a 1-molecule amplicon still
+            # satisfies `1 > 0` on the first iteration and would deref None below.
+            if gmm is not None and len(data) > reads:
                 reads = len(data)
                 lower_mean = sorted(gmm.means_.flatten())[0]
                 upper_mean = sorted(gmm.means_.flatten())[1]
